@@ -34,6 +34,18 @@ var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
 // migrations applied.
 func MigratedPostgres(t testing.TB) *pgxpool.Pool {
 	t.Helper()
+	pool, err := store.OpenPostgres(context.Background(), MigratedPostgresDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// MigratedPostgresDSN creates a fresh database, applies the embedded
+// migrations to it, and returns its DSN.
+func MigratedPostgresDSN(t testing.TB) string {
+	t.Helper()
 	ctx := context.Background()
 	dsn := Postgres(t)
 	m, err := migrate.NewPostgres(ctx, dsn, migrations.Postgres(), discard)
@@ -44,17 +56,25 @@ func MigratedPostgres(t testing.TB) *pgxpool.Pool {
 	if err := m.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
-	pool, err := store.OpenPostgres(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return dsn
 }
 
 // MigratedScylla returns a session on a fresh keyspace with the embedded
 // migrations applied.
 func MigratedScylla(t testing.TB) *gocql.Session {
+	t.Helper()
+	s, err := store.OpenScylla(MigratedScyllaConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	return s
+}
+
+// MigratedScyllaConfig creates a fresh keyspace, applies the embedded
+// migrations to it, and returns the config pointing at it. The keyspace is
+// dropped on cleanup.
+func MigratedScyllaConfig(t testing.TB) config.Scylla {
 	t.Helper()
 	ctx := context.Background()
 	cfg := Scylla(t)
@@ -66,12 +86,7 @@ func MigratedScylla(t testing.TB) *gocql.Session {
 	if err := m.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
-	s, err := store.OpenScylla(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(s.Close)
-	return s
+	return cfg
 }
 
 // Postgres creates an empty database for the test, drops it on cleanup, and
