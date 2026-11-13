@@ -23,6 +23,7 @@ linters:
         - name: exported
           disabled: true
   exclusions:
+    generated: Strict # api/gen is never edited by hand
     presets:
       - std-error-handling
     rules:

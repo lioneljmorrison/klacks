@@ -32,6 +32,7 @@ curl localhost:8080/readyz
 | `make migrate-up` / `migrate-version` | Apply / show versions (both stores) |
 | `make migrate-down STORE=scylla N=1` | Roll back one store |
 | `make migrate-force STORE=… TO=N` | Clear a dirty store after a manual fix |
+| `make proto` | Lint the protos and regenerate `api/gen` |
 
 ## Configuration
 
@@ -48,9 +49,11 @@ Postgres on 5432) and ScyllaDB on `127.0.0.1:9042`. Override them with
 
 ```
 cmd/klacks           the server binary (serve, migrate, config)
+api/proto            protobuf definitions; api/gen holds generated code
 internal/config      configuration loading and validation
 internal/logging     slog setup (text in dev, JSON in prod)
 internal/api         transports (HTTP now; WebSocket and gRPC later)
+internal/api/grpcapi the gRPC adapter over pkg/chat (not served yet)
 internal/core        rooms, sequencing, fan-out, resume
 internal/store       PostgreSQL + ScyllaDB access, migrations
 migrations/          embedded schema migrations for both stores
