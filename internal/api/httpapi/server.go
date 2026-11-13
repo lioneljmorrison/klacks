@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/lioneljmorrison/klacks/internal/config"
 )
@@ -54,8 +55,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 }
 
 // Serve serves on ln until ctx is cancelled, then shuts down gracefully:
-// /readyz starts failing, the listener closes, and in-flight requests get
-// up to cfg.ShutdownTimeout to finish.
+// /readyz starts failing, then after cfg.DrainDelay the listener closes and
+// in-flight requests get up to cfg.ShutdownTimeout to finish.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	errc := make(chan error, 1)
 	go func() { errc <- s.srv.Serve(ln) }()
@@ -67,8 +68,12 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	case <-ctx.Done():
 	}
 
-	s.log.Info("http server shutting down", "timeout", s.cfg.ShutdownTimeout.D())
 	s.health.Drain()
+	if d := s.cfg.DrainDelay.D(); d > 0 {
+		s.log.Info("draining: /readyz now fails; waiting before closing the listener", "delay", d)
+		time.Sleep(d)
+	}
+	s.log.Info("http server shutting down", "timeout", s.cfg.ShutdownTimeout.D())
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.ShutdownTimeout.D())
 	defer cancel()
 	if err := s.srv.Shutdown(shutdownCtx); err != nil {

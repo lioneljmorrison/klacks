@@ -100,6 +100,7 @@ func TestValidateRejects(t *testing.T) {
 		"zero timeout": {"KLACKS_SCYLLA_TIMEOUT": "0s"},
 		"bad keyspace": {"KLACKS_SCYLLA_KEYSPACE": "drop table;"},
 		"bad rf":       {"KLACKS_SCYLLA_REPLICATION_FACTOR": "0"},
+		"neg drain":    {"KLACKS_HTTP_DRAIN_DELAY": "-1s"},
 	}
 	for name, extra := range cases {
 		t.Run(name, func(t *testing.T) {

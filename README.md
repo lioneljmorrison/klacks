@@ -61,4 +61,6 @@ pkg/chat             the public, importable ChatService
 
 - `GET /healthz`: liveness. Always 200 while the process is serving.
 - `GET /readyz`: readiness. 200 when PostgreSQL and ScyllaDB both answer,
-  503 otherwise or while shutting down.
+  503 otherwise. On shutdown it reports `draining` for `KLACKS_HTTP_DRAIN_DELAY`
+  (default 0) before the listener closes, so load balancers can stop routing
+  traffic. In-flight requests then get `KLACKS_HTTP_SHUTDOWN_TIMEOUT` to finish.

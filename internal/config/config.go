@@ -47,7 +47,10 @@ type HTTP struct {
 	WriteTimeout      Duration `json:"write_timeout"`
 	IdleTimeout       Duration `json:"idle_timeout"`
 	ShutdownTimeout   Duration `json:"shutdown_timeout"`
-	ReadyTimeout      Duration `json:"ready_timeout"` // per-store /readyz check
+	// DrainDelay is how long /readyz reports "draining" before the listener
+	// closes, so load balancers can stop routing new traffic. 0 disables it.
+	DrainDelay   Duration `json:"drain_delay"`
+	ReadyTimeout Duration `json:"ready_timeout"` // per-store /readyz check
 }
 
 // Postgres configures the relational store.
@@ -160,6 +163,7 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	dur("KLACKS_HTTP_WRITE_TIMEOUT", &cfg.HTTP.WriteTimeout)
 	dur("KLACKS_HTTP_IDLE_TIMEOUT", &cfg.HTTP.IdleTimeout)
 	dur("KLACKS_HTTP_SHUTDOWN_TIMEOUT", &cfg.HTTP.ShutdownTimeout)
+	dur("KLACKS_HTTP_DRAIN_DELAY", &cfg.HTTP.DrainDelay)
 	dur("KLACKS_HTTP_READY_TIMEOUT", &cfg.HTTP.ReadyTimeout)
 	str("KLACKS_POSTGRES_DSN", &cfg.Postgres.DSN)
 	if v := getenv("KLACKS_SCYLLA_HOSTS"); v != "" {
@@ -228,6 +232,9 @@ func (c Config) Validate() error {
 			bad("%s must be positive", name)
 		}
 	}
+	if c.HTTP.DrainDelay < 0 {
+		bad("http.drain_delay must not be negative")
+	}
 	if c.Postgres.DSN == "" {
 		bad("postgres.dsn is required (KLACKS_POSTGRES_DSN)")
 	}
@@ -261,10 +268,15 @@ var kvPasswordRE = regexp.MustCompile(`(?i)(password\s*=\s*)('(?:[^'\\]|\\.)*'|\
 // RedactDSN masks the password in a Postgres URL or key=value DSN.
 func RedactDSN(dsn string) string {
 	if strings.Contains(dsn, "://") {
-		if u, err := url.Parse(dsn); err == nil {
-			return u.Redacted()
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return "<unparseable dsn>"
 		}
-		return "<unparseable dsn>"
+		if q := u.Query(); q.Has("password") {
+			q.Set("password", "xxxxx")
+			u.RawQuery = q.Encode()
+		}
+		return u.Redacted()
 	}
 	return kvPasswordRE.ReplaceAllString(dsn, "${1}xxxxx")
 }

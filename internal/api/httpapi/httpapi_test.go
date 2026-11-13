@@ -201,3 +201,34 @@ func TestShutdownTimeout(t *testing.T) {
 		t.Fatal("Serve ignored the shutdown timeout")
 	}
 }
+
+// TestDrainDelay checks that during the drain delay the server still answers,
+// with /readyz reporting draining, before it stops accepting connections.
+func TestDrainDelay(t *testing.T) {
+	cfg := testHTTPConfig()
+	cfg.DrainDelay = config.Duration(400 * time.Millisecond)
+	srv := NewServer(cfg, NewHealth(nil, time.Second, discard), discard)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ctx, ln) }()
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+
+	resp, err := http.Get("http://" + ln.Addr().String() + "/readyz")
+	if err != nil {
+		t.Fatalf("server closed during drain delay: %v", err)
+	}
+	var body readyResponse
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || body.Status != "draining" {
+		t.Fatalf("code=%d body=%+v, want 503 draining", resp.StatusCode, body)
+	}
+	if err := <-served; err != nil {
+		t.Fatal(err)
+	}
+}
