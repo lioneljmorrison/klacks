@@ -46,16 +46,17 @@ type MemberRemoved struct {
 	Actor store.UUID
 }
 
-// Service is the room and membership core.
+// Service is the room, membership and publish core.
 type Service struct {
 	rooms     *store.Rooms
+	messages  store.MessageStore
 	onRemoved func(context.Context, MemberRemoved)
 }
 
 // New returns a Service. onRemoved, if not nil, is called synchronously after
 // each committed removal.
-func New(rooms *store.Rooms, onRemoved func(context.Context, MemberRemoved)) *Service {
-	return &Service{rooms: rooms, onRemoved: onRemoved}
+func New(rooms *store.Rooms, messages store.MessageStore, onRemoved func(context.Context, MemberRemoved)) *Service {
+	return &Service{rooms: rooms, messages: messages, onRemoved: onRemoved}
 }
 
 // CreateRoom creates a room of kind with creator as its owner and returns

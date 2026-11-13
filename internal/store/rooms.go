@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -19,13 +21,24 @@ var (
 // uniqueViolation is the PostgreSQL SQLSTATE for a unique constraint failure.
 const uniqueViolation = "23505"
 
-// Rooms is the PostgreSQL store for rooms and membership (plan §3.3a).
+// Rooms is the PostgreSQL store for rooms, membership and the per-room seq
+// counter (plan §3.3a, §3.3c).
 type Rooms struct {
-	pool *pgxpool.Pool
+	pool        *pgxpool.Pool
+	lockTimeout time.Duration
 }
 
 // NewRooms returns a Rooms on a pool whose database is migrated.
-func NewRooms(pool *pgxpool.Pool) *Rooms { return &Rooms{pool: pool} }
+//
+// lockTimeout bounds every Locked transaction: it is the transaction's
+// lock_timeout, statement_timeout and idle_in_transaction_session_timeout.
+// It must be longer than the ScyllaDB write timeout. A publish holds the room
+// lock across its ScyllaDB write, during which the Postgres session is idle in
+// transaction; a shorter timeout would kill a live publish. The idle timeout
+// also releases the lock if a process hangs while holding it.
+func NewRooms(pool *pgxpool.Pool, lockTimeout time.Duration) *Rooms {
+	return &Rooms{pool: pool, lockTimeout: lockTimeout}
+}
 
 // CreateRoom creates a room of the given kind with a generated ID, its
 // room_seq counter, and owner as its first member with ownerRole, in one
@@ -55,6 +68,13 @@ func (r *Rooms) CreateRoom(ctx context.Context, kind string, owner UUID, ownerRo
 // calling fn, if the room does not exist.
 func (r *Rooms) Locked(ctx context.Context, room UUID, fn func(context.Context, *LockedRoom) error) error {
 	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		// set_config(..., true) is SET LOCAL: it lasts for this transaction.
+		ms := strconv.FormatInt(r.lockTimeout.Milliseconds(), 10)
+		if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true),
+			set_config('statement_timeout', $1, true),
+			set_config('idle_in_transaction_session_timeout', $1, true)`, ms); err != nil {
+			return fmt.Errorf("rooms: set timeouts: %w", err)
+		}
 		l := &LockedRoom{tx: tx, room: room}
 		err := tx.QueryRow(ctx, `SELECT next_seq FROM room_seq WHERE room_id = $1 FOR UPDATE`, room).Scan(&l.nextSeq)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -108,6 +128,31 @@ func (l *LockedRoom) RemoveMember(ctx context.Context, user UUID) error {
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("rooms: remove member: %w", ErrMemberNotFound)
+	}
+	return nil
+}
+
+// NextSeq is the seq the next published message gets: the locked
+// room_seq.next_seq. The committed watermark (hi) is NextSeq - 1.
+func (l *LockedRoom) NextSeq() int64 { return l.nextSeq }
+
+// WriteTS returns the next ScyllaDB write timestamp from the
+// message_write_ts sequence. Taken under the room lock, it is higher than
+// that of any earlier attempt at the same seq, so a retry overwrites an
+// orphan (plan §3.3c).
+func (l *LockedRoom) WriteTS(ctx context.Context) (int64, error) {
+	var ts int64
+	if err := l.tx.QueryRow(ctx, `SELECT nextval('message_write_ts')`).Scan(&ts); err != nil {
+		return 0, fmt.Errorf("rooms: write timestamp: %w", err)
+	}
+	return ts, nil
+}
+
+// AdvanceSeq sets next_seq to NextSeq + 1. It takes effect when the
+// enclosing Locked call commits.
+func (l *LockedRoom) AdvanceSeq(ctx context.Context) error {
+	if _, err := l.tx.Exec(ctx, `UPDATE room_seq SET next_seq = $2 WHERE room_id = $1`, l.room, l.nextSeq+1); err != nil {
+		return fmt.Errorf("rooms: advance seq: %w", err)
 	}
 	return nil
 }

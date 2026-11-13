@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/lioneljmorrison/klacks/internal/core"
 	"github.com/lioneljmorrison/klacks/internal/store"
@@ -27,7 +28,7 @@ func (r *removals) hook(_ context.Context, e core.MemberRemoved) { *r = append(*
 
 func newService(t *testing.T, onRemoved func(context.Context, core.MemberRemoved)) *core.Service {
 	t.Helper()
-	return core.New(store.NewRooms(dbtest.MigratedPostgres(t)), onRemoved)
+	return core.New(store.NewRooms(dbtest.MigratedPostgres(t), 10*time.Second), nil, onRemoved)
 }
 
 func TestCreateRoomKinds(t *testing.T) {

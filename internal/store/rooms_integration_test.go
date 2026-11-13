@@ -6,10 +6,15 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/lioneljmorrison/klacks/internal/store"
 	"github.com/lioneljmorrison/klacks/internal/testutil/dbtest"
 )
+
+const testLockTimeout = 10 * time.Second
 
 // role reads user's role in room under the room lock.
 func role(t *testing.T, rooms *store.Rooms, room, user store.UUID) (string, bool) {
@@ -29,7 +34,7 @@ func role(t *testing.T, rooms *store.Rooms, room, user store.UUID) (string, bool
 
 func TestRoomsCreate(t *testing.T) {
 	pool := dbtest.MigratedPostgres(t)
-	rooms := store.NewRooms(pool)
+	rooms := store.NewRooms(pool, testLockTimeout)
 	ctx := context.Background()
 	owner := id(0xb1)
 
@@ -62,7 +67,7 @@ func TestRoomsCreate(t *testing.T) {
 }
 
 func TestRoomsMembership(t *testing.T) {
-	rooms := store.NewRooms(dbtest.MigratedPostgres(t))
+	rooms := store.NewRooms(dbtest.MigratedPostgres(t), testLockTimeout)
 	ctx := context.Background()
 	owner, user := id(0xb1), id(0xb2)
 	room, err := rooms.CreateRoom(ctx, "group", owner, "owner")
@@ -100,7 +105,7 @@ func TestRoomsMembership(t *testing.T) {
 }
 
 func TestRoomsLockedMissingRoom(t *testing.T) {
-	rooms := store.NewRooms(dbtest.MigratedPostgres(t))
+	rooms := store.NewRooms(dbtest.MigratedPostgres(t), testLockTimeout)
 	called := false
 	err := rooms.Locked(context.Background(), id(0xee), func(context.Context, *store.LockedRoom) error {
 		called = true
@@ -113,7 +118,7 @@ func TestRoomsLockedMissingRoom(t *testing.T) {
 
 // TestRoomsLockedRollsBack checks that an error from fn rolls back its writes.
 func TestRoomsLockedRollsBack(t *testing.T) {
-	rooms := store.NewRooms(dbtest.MigratedPostgres(t))
+	rooms := store.NewRooms(dbtest.MigratedPostgres(t), testLockTimeout)
 	ctx := context.Background()
 	room, err := rooms.CreateRoom(ctx, "group", id(0xb1), "owner")
 	if err != nil {
@@ -132,4 +137,106 @@ func TestRoomsLockedRollsBack(t *testing.T) {
 	if _, ok := role(t, rooms, room, id(0xb2)); ok {
 		t.Fatal("write from a failed transaction was committed")
 	}
+}
+
+func TestRoomsSeq(t *testing.T) {
+	rooms := store.NewRooms(dbtest.MigratedPostgres(t), testLockTimeout)
+	ctx := context.Background()
+	room, err := rooms.CreateRoom(ctx, "group", id(0xb1), "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prevTS int64
+	for want := int64(1); want <= 3; want++ {
+		err := rooms.Locked(ctx, room, func(ctx context.Context, l *store.LockedRoom) error {
+			if got := l.NextSeq(); got != want {
+				t.Fatalf("NextSeq = %d, want %d", got, want)
+			}
+			ts, err := l.WriteTS(ctx)
+			if err != nil {
+				return err
+			}
+			if ts <= prevTS {
+				t.Fatalf("WriteTS %d after %d: not increasing", ts, prevTS)
+			}
+			prevTS = ts
+			return l.AdvanceSeq(ctx)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A rolled-back advance leaves the counter alone.
+	_ = rooms.Locked(ctx, room, func(ctx context.Context, l *store.LockedRoom) error {
+		if err := l.AdvanceSeq(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return errors.New("roll back")
+	})
+	_ = rooms.Locked(ctx, room, func(_ context.Context, l *store.LockedRoom) error {
+		if got := l.NextSeq(); got != 4 {
+			t.Fatalf("NextSeq after rollback = %d, want 4", got)
+		}
+		return nil
+	})
+}
+
+// TestRoomsLockTimeouts checks that Locked bounds both waiting for the room
+// lock and sitting idle while holding it (plan §3.3c operational constraints).
+func TestRoomsLockTimeouts(t *testing.T) {
+	const timeout = 300 * time.Millisecond
+	rooms := store.NewRooms(dbtest.MigratedPostgres(t), timeout)
+	ctx := context.Background()
+	room, err := rooms.CreateRoom(ctx, "group", id(0xb1), "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("waiting for the lock", func(t *testing.T) {
+		held, release := make(chan struct{}), make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			done <- rooms.Locked(ctx, room, func(ctx context.Context, l *store.LockedRoom) error {
+				close(held)
+				// Stay busy, so the idle timeout does not end this transaction.
+				for {
+					select {
+					case <-release:
+						return nil
+					case <-time.After(timeout / 4):
+						if _, _, err := l.Role(ctx, id(0xb1)); err != nil {
+							return err
+						}
+					}
+				}
+			})
+		}()
+		<-held
+		start := time.Now()
+		err := rooms.Locked(ctx, room, func(context.Context, *store.LockedRoom) error { return nil })
+		waited := time.Since(start)
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatalf("holder: %v", err)
+		}
+		var pgErr *pgconn.PgError
+		// lock_timeout and statement_timeout are equal, so either may fire.
+		if !errors.As(err, &pgErr) || pgErr.Code != "55P03" && pgErr.Code != "57014" {
+			t.Fatalf("waiter err = %v, want lock_not_available or query_canceled", err)
+		}
+		if waited > 5*timeout {
+			t.Fatalf("waiter gave up after %v, want about %v", waited, timeout)
+		}
+	})
+
+	t.Run("idle while holding the lock", func(t *testing.T) {
+		err := rooms.Locked(ctx, room, func(ctx context.Context, l *store.LockedRoom) error {
+			time.Sleep(3 * timeout)
+			_, _, err := l.Role(ctx, id(0xb1))
+			return err
+		})
+		if err == nil {
+			t.Fatal("transaction idle past the timeout still succeeded")
+		}
+	})
 }
