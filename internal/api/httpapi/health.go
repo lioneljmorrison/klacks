@@ -1,5 +1,5 @@
-// Package httpapi is the HTTP transport: health endpoints now, REST and the
-// WebSocket endpoint later.
+// Package httpapi is the HTTP server: health endpoints and the routes it is
+// given, such as the WebSocket endpoint. REST comes later.
 package httpapi
 
 import (
