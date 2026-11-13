@@ -24,9 +24,12 @@ func (c *Client) Dial(ctx context.Context) error {
 	url := "ws" + strings.TrimPrefix(c.base, "http") + "/ws?user=" + format(c.user) + "&device=" + format(c.device)
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(dialCtx, url, nil)
+	conn, resp, err := websocket.Dial(dialCtx, url, nil)
 	if err != nil {
 		return fmt.Errorf("dial /ws: %w", err)
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
 	}
 	conn.SetReadLimit(-1)
 	c.conn = conn
@@ -44,6 +47,9 @@ func (c *Client) Close() {
 		if c.conn != nil {
 			_ = c.conn.Close(websocket.StatusNormalClosure, "")
 		}
+		// The read loop is the only sender on Inbox and Errs: wait for it
+		// to exit before closing what it feeds.
+		<-c.readerDone
 		close(c.done)
 		close(c.Inbox)
 		close(c.Errs)
@@ -106,6 +112,7 @@ func (c *Client) Send(ctx context.Context, room [16]byte, peers []Peer, plaintex
 // go through the ordering check and the ratchet; error frames and read
 // failures surface on Errs.
 func (c *Client) readLoop() {
+	defer close(c.readerDone)
 	for {
 		var f protocol.Frame
 		err := c.readFrame(&f)
@@ -195,6 +202,22 @@ func (c *Client) handleDeliver(f protocol.Deliver) {
 		Header:       f.Header,
 		Ciphertext:   f.Ciphertext,
 	}
+	redelivery, err := c.checkOrdering(d.Room, d.Seq, d.MessageID)
+	if err != nil {
+		c.inbox(Received{
+			Room: d.Room, Seq: d.Seq, Sender: d.Sender,
+			SenderDevice: d.SenderDevice, MessageID: d.MessageID, Err: err,
+		})
+		return
+	}
+	c.decryptDeliver(d, redelivery)
+}
+
+// decryptDeliver runs one ordering-checked deliver through the ratchet and
+// emits the outcome. Messages stashed pending the session's first message
+// say so silently; when a decrypt succeeds and any stash exists, the stash
+// is decrypted and emitted too.
+func (c *Client) decryptDeliver(d deliver, redelivery bool) {
 	r := Received{
 		Room:         d.Room,
 		Seq:          d.Seq,
@@ -202,31 +225,51 @@ func (c *Client) handleDeliver(f protocol.Deliver) {
 		SenderDevice: d.SenderDevice,
 		MessageID:    d.MessageID,
 	}
-	if err := c.checkOrdering(d.Room, d.Seq, d.MessageID); err != nil {
-		r.Err = err
-		c.inbox(r)
-		return
-	}
-	pt, err := c.unseal(d.Room, d)
+	pt, uerr := c.unseal(d.Room, d)
 	switch {
-	case errors.Is(err, errNotForMe):
+	case errors.Is(uerr, errPending):
+		// Stashed; nothing to emit yet.
+		return
+	case errors.Is(uerr, errNotForMe):
 		// Another member's copy: expected in multi-member rooms, silent.
 		return
-	case err != nil:
-		r.Err = err
+	case uerr != nil:
+		r.Err = uerr
 		c.inbox(r)
+		c.ack(d.Room, d.Seq)
+		return
+	case redelivery:
+		// Already delivered once and it re-verifies: stay silent.
+		return
 	default:
 		r.Plaintext = pt
 		c.inbox(r)
 	}
-	// The message is consumed; let the server prune its replay buffer.
 	c.ack(d.Room, d.Seq)
+	// The session now exists; anything that arrived before the session's
+	// first message can finally be decrypted, in arrival order (the
+	// ratchet's skipped-key handling puts the chain back together).
+	for _, pd := range c.takePending(d.Room, d.SenderDevice) {
+		c.decryptDeliver(pd, false)
+	}
+}
+
+// takePending returns and clears the messages stashed for a sender device.
+func (c *Client) takePending(room, senderDevice [16]byte) []deliver {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := sessionKey{room: room, peer: senderDevice}
+	out := c.pending[key]
+	delete(c.pending, key)
+	return out
 }
 
 // checkOrdering verifies the room's seq stream: strictly increasing, no
 // gaps, one message id per seq, no id at two seqs. The server owns this
-// promise; a violation means the stream was tampered with.
-func (c *Client) checkOrdering(room [16]byte, seq int64, mid [16]byte) error {
+// promise; a violation means the stream was tampered with. A true
+// redelivery flag marks a message already seen at the same seq, which the
+// caller may then verify and suppress instead of re-emitting.
+func (c *Client) checkOrdering(room [16]byte, seq int64, mid [16]byte) (redelivery bool, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	rs, ok := c.rooms[room]
@@ -235,7 +278,7 @@ func (c *Client) checkOrdering(room [16]byte, seq int64, mid [16]byte) error {
 		c.rooms[room] = rs
 	}
 	if id, dup := rs.ids[mid]; dup && id != seq {
-		return fmt.Errorf("room stream: message %s appears at seq %d and %d", format(mid), id, seq)
+		return false, fmt.Errorf("room stream: message %s appears at seq %d and %d", format(mid), id, seq)
 	}
 	if !rs.started {
 		// Baseline: subscribe anchors live delivery above any history this
@@ -244,24 +287,24 @@ func (c *Client) checkOrdering(room [16]byte, seq int64, mid [16]byte) error {
 		rs.lastSeq = seq
 		rs.seen[seq] = mid
 		rs.ids[mid] = seq
-		return nil
+		return false, nil
 	}
 	switch {
 	case seq == rs.lastSeq+1:
 		rs.lastSeq = seq
 		rs.seen[seq] = mid
 		rs.ids[mid] = seq
-		return nil
+		return false, nil
 	case seq <= rs.lastSeq:
 		if id, ok := rs.seen[seq]; ok && id == mid {
 			// A redelivery of something already consumed: resume and
 			// live delivery can overlap; idempotent.
-			return nil
+			return true, nil
 		}
-		return fmt.Errorf("room stream: seq %d redelivered with message %s, was %s",
+		return false, fmt.Errorf("room stream: seq %d redelivered with message %s, was %s",
 			seq, format(mid), format(rs.seen[seq]))
 	default: // seq > lastSeq+1: a gap
-		return fmt.Errorf("room stream: gap: seq %d after %d", seq, rs.lastSeq)
+		return false, fmt.Errorf("room stream: gap: seq %d after %d", seq, rs.lastSeq)
 	}
 }
 

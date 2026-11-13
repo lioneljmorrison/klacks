@@ -5,6 +5,7 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -23,7 +24,10 @@ var (
 	devA  = "b2000000-0000-0000-0000-000000000001"
 )
 
-func key(n int) string { return fmt.Sprintf(`"%s"`, make([]byte, n)) }
+// b64 is a JSON-encoded base64 string of n zero bytes.
+func b64(n int) []byte {
+	return []byte(`"` + base64.StdEncoding.EncodeToString(make([]byte, n)) + `"`)
+}
 
 // testDevices builds a server with the devices endpoints on migrated
 // Postgres and returns its client-facing base URL.
@@ -59,10 +63,6 @@ func do(t *testing.T, method, url string, user, device string, body []byte) (int
 	return resp.StatusCode, buf.Bytes()
 }
 
-func b64(n int) []byte {
-	return []byte(`"` + string(make([]byte, n)) + `"`)
-}
-
 func TestDevicesRESTFlow(t *testing.T) {
 	base, _ := testDevices(t)
 
@@ -95,11 +95,13 @@ func TestDevicesRESTFlow(t *testing.T) {
 
 	// The second fetch takes prekey 2; a third is exhausted.
 	code, body = do(t, http.MethodGet, base+"/v1/users/"+userA+"/devices/"+devA+"/bundle", userB, devA, nil)
+	got = bundleResponse{}
 	_ = json.Unmarshal(body, &got)
 	if code != http.StatusOK || got.OneTimePrekey == nil || got.OneTimePrekey.ID != 2 || got.OneTimePrekeysRemaining != 0 {
 		t.Fatalf("second fetch code %d = %+v, want prekey 2, 0 remaining", code, got)
 	}
 	code, body = do(t, http.MethodGet, base+"/v1/users/"+userA+"/devices/"+devA+"/bundle", userB, devA, nil)
+	got = bundleResponse{}
 	_ = json.Unmarshal(body, &got)
 	if code != http.StatusOK || got.OneTimePrekey != nil || got.OneTimePrekeysRemaining != 0 {
 		t.Fatalf("exhausted fetch code %d = %+v, want no prekey", code, got)
@@ -111,6 +113,7 @@ func TestDevicesRESTFlow(t *testing.T) {
 		t.Fatalf("replenish code %d body %s", code, body)
 	}
 	code, body = do(t, http.MethodGet, base+"/v1/users/"+userA+"/devices/"+devA+"/bundle", userB, devA, nil)
+	got = bundleResponse{}
 	_ = json.Unmarshal(body, &got)
 	if code != http.StatusOK || got.OneTimePrekey == nil || got.OneTimePrekey.ID != 3 || got.OneTimePrekeysRemaining != 0 {
 		t.Fatalf("post-replenish fetch = %+v, want prekey 3", got)

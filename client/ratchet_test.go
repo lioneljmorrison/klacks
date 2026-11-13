@@ -40,7 +40,7 @@ func ratchetPair(t *testing.T) (alice, bob *Ratchet, ad []byte) {
 	// The first message's header carries the prelude and the initiator's
 	// first ratchet key; the responder's ratchet starts from it. It is
 	// encrypted and consumed here, exactly as the transport would deliver it.
-	hdr, ct, err := aliceR.Encrypt([]byte("first"), []byte("ad"), [16]byte{}, &pre)
+	hdr, ct, err := aliceR.Encrypt([]byte("first"), []byte("ad"), [16]byte{9}, [16]byte{8}, &pre)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestRatchetBidirectional(t *testing.T) {
 
 	for i := 0; i < 50; i++ {
 		msg := fmt.Sprintf("a->b %d", i)
-		hdr, ct, err := alice.Encrypt([]byte(msg), ad, [16]byte{}, nil)
+		hdr, ct, err := alice.Encrypt([]byte(msg), ad, [16]byte{9}, [16]byte{8}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -79,7 +79,7 @@ func TestRatchetBidirectional(t *testing.T) {
 	// from then on both sides ratchet freely, in both directions.
 	for i := 0; i < 50; i++ {
 		msg := fmt.Sprintf("b->a %d", i)
-		hdr, ct, err := bob.Encrypt([]byte(msg), ad, [16]byte{}, nil)
+		hdr, ct, err := bob.Encrypt([]byte(msg), ad, [16]byte{9}, [16]byte{8}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -94,7 +94,7 @@ func TestRatchetBidirectional(t *testing.T) {
 	// And back to alice sending.
 	for i := 0; i < 10; i++ {
 		msg := fmt.Sprintf("a->b again %d", i)
-		hdr, ct, err := alice.Encrypt([]byte(msg), ad, [16]byte{}, nil)
+		hdr, ct, err := alice.Encrypt([]byte(msg), ad, [16]byte{9}, [16]byte{8}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -117,7 +117,7 @@ func TestRatchetOutOfOrder(t *testing.T) {
 	}
 	var msgs []env
 	for i := 0; i < 5; i++ {
-		hdr, ct, err := alice.Encrypt([]byte(fmt.Sprintf("m%d", i)), ad, [16]byte{}, nil)
+		hdr, ct, err := alice.Encrypt([]byte(fmt.Sprintf("m%d", i)), ad, [16]byte{9}, [16]byte{8}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -137,7 +137,7 @@ func TestRatchetOutOfOrder(t *testing.T) {
 func TestRatchetRejects(t *testing.T) {
 	alice, bob, ad := ratchetPair(t)
 
-	hdr, ct, err := alice.Encrypt([]byte("secret"), ad, [16]byte{}, nil)
+	hdr, ct, err := alice.Encrypt([]byte("secret"), ad, [16]byte{9}, [16]byte{8}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,16 +157,26 @@ func TestRatchetRejects(t *testing.T) {
 	if _, err := bob.Decrypt(badHdr, ct, ad); err == nil {
 		t.Fatal("tampered header accepted")
 	}
-	// The real message decrypts; a replay of it does not.
+	// The real message decrypts; an identical replay returns the same
+	// plaintext (resume re-delivers), while a replay with tampered
+	// content is refused.
 	if got, err := bob.Decrypt(hdr, ct, ad); err != nil || string(got) != "secret" {
 		t.Fatalf("real message: %q %v", got, err)
 	}
-	if _, err := bob.Decrypt(hdr, ct, ad); err == nil {
-		t.Fatal("replay of consumed message accepted")
+	if got, err := bob.Decrypt(hdr, ct, ad); err != nil || string(got) != "secret" {
+		t.Fatalf("identical replay: %q %v", got, err)
+	}
+	tamperedCT := append([]byte(nil), ct...)
+	tamperedCT[0] ^= 0xFF
+	if _, err := bob.Decrypt(hdr, tamperedCT, ad); err == nil {
+		t.Fatal("replay with tampered ciphertext accepted")
+	}
+	if _, err := bob.Decrypt(hdr, ct, []byte("other ad")); err == nil {
+		t.Fatal("replay with tampered AD accepted")
 	}
 	// And the original state still works: the failed attempts above must
 	// not have desynchronized the session.
-	hdr2, ct2, err := alice.Encrypt([]byte("still fine"), ad, [16]byte{}, nil)
+	hdr2, ct2, err := alice.Encrypt([]byte("still fine"), ad, [16]byte{9}, [16]byte{8}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +195,7 @@ func TestRatchetNonceAndKeyUniqueness(t *testing.T) {
 	// property the envelope depends on (S-25).
 	seen := make(map[string]bool)
 	for i := 0; i < 2000; i++ {
-		hdr, ct, err := alice.Encrypt([]byte("same plaintext"), ad, [16]byte{}, nil)
+		hdr, ct, err := alice.Encrypt([]byte("same plaintext"), ad, [16]byte{9}, [16]byte{8}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -263,10 +263,16 @@ func TestSessionRejectsTamperedEnvelope(t *testing.T) {
 		t.Fatalf("tampered ciphertext: %+v", r)
 	}
 
-	// The session is untouched: the honest delivery still decrypts.
-	bob.handleDeliver(d)
-	if r := inbox(t, bob); r.Err != nil || string(r.Plaintext) != "hello" {
-		t.Fatalf("honest delivery after tamper attempts: %+v", r)
+	// The session is untouched: the honest copy of the same message
+	// re-verifies silently, and a fresh message still decrypts.
+	bob.handleDeliver(d) // redelivery, re-verifies: no event
+	e2, err := alice.sealFor(ctx, room, peerBob, []byte("fresh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob.handleDeliver(deliverOf(room, 2, alice, e2))
+	if r := inbox(t, bob); r.Err != nil || string(r.Plaintext) != "fresh" {
+		t.Fatalf("fresh delivery after tamper attempts: %+v", r)
 	}
 
 	// A repeated message id at a different seq is a tampered stream.
@@ -294,6 +300,11 @@ func newTestServer(t *testing.T, h http.Handler) *httptest.Server {
 	t.Cleanup(ts.Close)
 	return ts
 }
+
+// discardWriter absorbs log output in tests.
+type discardWriter struct{}
+
+func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // testLogger discards; NewServer requires a logger.
 func testLogger() *slog.Logger {

@@ -66,17 +66,6 @@ func (b *Bundle) Verify() error {
 
 // Wire shapes for the prekey REST endpoints; the transport marshals them.
 
-// wireUpload is a PUT /v1/device/bundle body: the bundle plus the initial
-// batch of one-time prekeys.
-type wireUpload struct {
-	IdentityKey           []byte       `json:"identity_key"`
-	IdentityDHKey         []byte       `json:"identity_dh_key"`
-	SignedPrekeyID        int64        `json:"signed_prekey_id"`
-	SignedPrekey          []byte       `json:"signed_prekey"`
-	SignedPrekeySignature []byte       `json:"signed_prekey_signature"`
-	OneTimePrekeys        []wirePrekey `json:"one_time_prekeys"`
-}
-
 // wirePrekey is one entry of a one_time_prekeys list.
 type wirePrekey struct {
 	ID  int64  `json:"id"`

@@ -80,7 +80,7 @@ func (c *Client) sealFor(ctx context.Context, room [16]byte, peer Peer, plaintex
 		RecipientDevice: peer.Device,
 		MessageID:       mid,
 	}
-	header, ciphertext, err := s.ratchet.Encrypt(plaintext, ad.Bytes(), peer.Device, pre)
+	header, ciphertext, err := s.ratchet.Encrypt(plaintext, ad.Bytes(), c.device, peer.Device, pre)
 	if err != nil {
 		return encryptResult{}, fmt.Errorf("encrypt: %w", err)
 	}
@@ -118,6 +118,10 @@ func (c *Client) initiateLocked(ctx context.Context, room [16]byte, peer Peer) (
 	return s, nil
 }
 
+// errPending marks a message stashed until the session's first message
+// arrives and establishes the session.
+var errPending = errors.New("client: awaiting the session's first message")
+
 // unseal decrypts one delivered message addressed to this device: it
 // establishes the responding session on a session's first message, then
 // runs the ratchet. The AD is rebuilt from the delivered frame's fields,
@@ -126,19 +130,31 @@ func (c *Client) unseal(room [16]byte, d deliver) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	key := sessionKey{room: room, peer: d.SenderDevice}
 	h, err := decodeHeader(d.Header)
 	if err != nil {
 		return nil, err
 	}
+	// The header names the sending device, the session's routing key; a
+	// delivered frame whose device_id disagrees with it is a tampered
+	// stream. The AEAD additionally binds the frame's device_id.
+	if h.device != d.SenderDevice {
+		return nil, fmt.Errorf("decrypt: header names device %s, delivered from %s",
+			format(h.device), format(d.SenderDevice))
+	}
+	key := sessionKey{room: room, peer: h.device}
+	s, ok := c.sessions[key]
 	if h.recipient != c.device {
 		return nil, errNotForMe
 	}
-	s, ok := c.sessions[key]
 	if !ok {
-		// A session's first message establishes it.
 		if !h.isPrekey() {
-			return nil, fmt.Errorf("decrypt: no session for %s and the header is not a prekey header", format(d.SenderDevice))
+			// The session's first message commits after some of its
+			// successors (publishes race for the room lock): stash this
+			// one until the prekey message arrives and establishes the
+			// session; the ratchet's skipped-key handling then orders
+			// them.
+			c.pending[key] = append(c.pending[key], d)
+			return nil, errPending
 		}
 		if s, err = c.respondLocked(room, Peer{User: d.Sender, Device: d.SenderDevice}, h); err != nil {
 			return nil, err

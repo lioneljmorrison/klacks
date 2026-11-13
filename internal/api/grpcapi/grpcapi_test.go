@@ -119,7 +119,6 @@ func (f *fakeChat) Subscribe(ctx context.Context, r chat.RoomID, from chat.Seq) 
 // bundle, so the adapter tests can check conversion in both directions.
 
 var (
-	regUser   = chat.UserID{15: 0x02}
 	regDevice = chat.DeviceID{14: 0x22}
 )
 

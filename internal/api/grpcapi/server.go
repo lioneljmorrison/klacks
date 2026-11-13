@@ -16,6 +16,7 @@ package grpcapi
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -170,6 +171,10 @@ func (s *Server) DeviceBundle(ctx context.Context, req *chatv1.DeviceBundleReque
 	if err != nil {
 		return nil, wrap("device bundle", err)
 	}
+	rem := taken.Remaining
+	if rem > math.MaxInt32 {
+		rem = math.MaxInt32
+	}
 	resp := &chatv1.DeviceBundleResponse{
 		Bundle: &chatv1.PrekeyBundle{
 			IdentityKey:           b.IdentityKey,
@@ -178,7 +183,7 @@ func (s *Server) DeviceBundle(ctx context.Context, req *chatv1.DeviceBundleReque
 			SignedPrekey:          b.SignedPrekey,
 			SignedPrekeySignature: b.SignedPrekeySignature,
 		},
-		Remaining: int32(taken.Remaining),
+		Remaining: int32(rem),
 	}
 	if taken.ID != 0 {
 		resp.OneTimePrekey = &chatv1.Prekey{Id: taken.ID, Key: taken.Key}

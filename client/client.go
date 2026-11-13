@@ -38,11 +38,16 @@ type Client struct {
 	mu       sync.Mutex
 	sessions map[sessionKey]*session
 	rooms    map[[16]byte]*roomState
+	// pending holds messages that arrived before the session's first
+	// message (publishes can commit out of send order): they decrypt once
+	// the prekey message establishes the session.
+	pending map[sessionKey][]deliver
 
 	// The WebSocket connection and its read loop.
 	conn       *websocket.Conn
 	readCtx    context.Context
 	readCancel context.CancelFunc
+	readerDone chan struct{} // closed when the read loop exits
 	log        *slog.Logger
 
 	// Inbox receives one event per delivered message, decrypted or with
@@ -113,20 +118,22 @@ func newClientWithKeys(base string, user, device [16]byte, id IdentityKey, spk S
 		return nil, errors.New("client: signed prekey id must be >= 1")
 	}
 	c := &Client{
-		base:     strings.TrimSuffix(base, "/"),
-		user:     user,
-		device:   device,
-		id:       id,
-		spk:      spk,
-		opkNext:  1,
-		opkPrivs: make(map[int64]OneTimePrekey, len(opks)),
-		sessions: make(map[sessionKey]*session),
-		rooms:    make(map[[16]byte]*roomState),
-		httpc:    &http.Client{},
-		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Inbox:    make(chan Received, 1024),
-		Errs:     make(chan error, 64),
-		done:     make(chan struct{}),
+		base:       strings.TrimSuffix(base, "/"),
+		user:       user,
+		device:     device,
+		id:         id,
+		spk:        spk,
+		opkNext:    1,
+		opkPrivs:   make(map[int64]OneTimePrekey, len(opks)),
+		sessions:   make(map[sessionKey]*session),
+		rooms:      make(map[[16]byte]*roomState),
+		pending:    make(map[sessionKey][]deliver),
+		httpc:      &http.Client{},
+		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Inbox:      make(chan Received, 1024),
+		Errs:       make(chan error, 64),
+		done:       make(chan struct{}),
+		readerDone: make(chan struct{}),
 	}
 	if err := c.AddOneTimePrekeys(opks); err != nil {
 		return nil, err

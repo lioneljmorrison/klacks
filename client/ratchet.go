@@ -7,22 +7,26 @@ package client
 //
 // Headers are versioned, fixed-width frames; every field is big-endian:
 //
-//	0x02: version || dh(32) || pn(4) || n(4) || recipient(32)      — normal
+//	0x02: version || dh(32) || pn(4) || n(4) || recipient(16) || device(16)
 //	0x01: version || identity_ed(32) || identity_dh(32) ||
 //	      ephemeral(32) || spk_id(8) || opk_id(8) || dh(32) ||
-//	      pn(4) || n(4) || recipient(32)                          — first
+//	      pn(4) || n(4) || recipient(16) || device(16)
 //
 // recipient is the recipient device's UUID: the receiver skips messages
 // addressed to another device before its ratchet sees them, so one member's
 // copy of a room message cannot consume another member's ratchet state.
-// The header is authenticated (the envelope binds it into the AEAD) but not
-// encrypted, exactly as Signal's.
+// device is the sending device's UUID, the routing key for the session; a
+// delivered frame whose device_id differs from it is a tampered stream and
+// is rejected before the session is touched. The header is authenticated
+// (the envelope binds it into the AEAD) but not encrypted, as Signal's.
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 )
 
 // Ratchet header version and type bytes.
@@ -55,6 +59,23 @@ type Ratchet struct {
 	nRecv     uint32
 	pn        uint32 // the previous send chain's length, for the header
 	skipped   map[skippedID]MessageKey
+
+	// cache holds recently decrypted messages by (ratchet key, chain
+	// index), so an identical redelivery — the transport re-sends on
+	// resume — decrypts to the same plaintext, while a replay with
+	// different content (a tampered row, a spliced message) is refused.
+	// Bounded: evicting the oldest keeps it flat.
+	cache      map[skippedID]cacheEntry
+	cacheOrder []skippedID
+}
+
+// cacheLimit bounds the decrypt cache.
+const cacheLimit = 512
+
+type cacheEntry struct {
+	adHash [32]byte // sha256 of the associated data
+	ctHash [32]byte // sha256 of the ciphertext
+	pt     []byte
 }
 
 // skippedID names a skipped message key: (ratchet key, chain index).
@@ -80,6 +101,7 @@ func NewInitiatorRatchet(root [32]byte, peerSignedPrekey [32]byte) (*Ratchet, er
 		dhSelf:  priv, dhSelfPub: pub,
 		dhRemote: peerSignedPrekey,
 		skipped:  make(map[skippedID]MessageKey),
+		cache:    make(map[skippedID]cacheEntry),
 	}
 	// RK, CKs = KDF_RK(SK, DH(DHs, DHr)): the initiator can send at once.
 	dh, err := x25519(priv, peerSignedPrekey)
@@ -110,6 +132,7 @@ func NewResponderRatchet(root [32]byte, signedPrekey SignedPrekey, dhRemote [32]
 		dhSelf:  signedPrekey.Priv, dhSelfPub: pub,
 		dhRemote: dhRemote,
 		skipped:  make(map[skippedID]MessageKey),
+		cache:    make(map[skippedID]cacheEntry),
 	}
 	// RK, CKr = KDF_RK(SK, DH(DHs, DHr)): the responder can receive at
 	// once; it sends only after its first DH ratchet step.
@@ -180,8 +203,8 @@ func kdfChain(ck [32]byte) (mk MessageKey, next [32]byte, err error) {
 
 // Encrypt advances the send chain one step and seals plaintext. pre carries
 // the X3DH prelude on a session's first message and must be nil afterwards;
-// recipient is the recipient device's UUID.
-func (r *Ratchet) Encrypt(plaintext, ad []byte, recipient [16]byte, pre *PrekeyHeader) ([]byte, []byte, error) {
+// sender and recipient are the sending and receiving devices' UUIDs.
+func (r *Ratchet) Encrypt(plaintext, ad []byte, sender, recipient [16]byte, pre *PrekeyHeader) ([]byte, []byte, error) {
 	if !r.hasSend {
 		// The responder's first send: a send-side DH ratchet step. Its
 		// root is the one both sides share after initialization, so the
@@ -201,9 +224,9 @@ func (r *Ratchet) Encrypt(plaintext, ad []byte, recipient [16]byte, pre *PrekeyH
 
 	var hdr []byte
 	if pre != nil {
-		hdr = encodePrekeyHeader(*pre, r.dhSelfPub, r.pn, n, recipient)
+		hdr = encodePrekeyHeader(*pre, r.dhSelfPub, r.pn, n, sender, recipient)
 	} else {
-		hdr = encodeHeader(r.dhSelfPub, r.pn, n, recipient)
+		hdr = encodeHeader(r.dhSelfPub, r.pn, n, sender, recipient)
 	}
 	ct, err := Seal(mk, plaintext, ad, hdr)
 	if err != nil {
@@ -238,6 +261,11 @@ func (r *Ratchet) clone() *Ratchet {
 	for k, v := range r.skipped {
 		c.skipped[k] = v
 	}
+	c.cache = make(map[skippedID]cacheEntry, len(r.cache))
+	for k, v := range r.cache {
+		c.cache[k] = v
+	}
+	c.cacheOrder = append([]skippedID(nil), r.cacheOrder...)
 	return &c
 }
 
@@ -247,6 +275,16 @@ func (r *Ratchet) decrypt(header, ciphertext, ad []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// An identical replay of a decrypted message returns the same
+	// plaintext; the same position with different content is refused.
+	adSum := sha256.Sum256(ad)
+	ctSum := sha256.Sum256(ciphertext)
+	if e, ok := r.cache[skippedID{dh: h.dh, n: h.n}]; ok {
+		if e.adHash == adSum && e.ctHash == ctSum {
+			return e.pt, nil
+		}
+		return nil, fmt.Errorf("ratchet: replay of message %d with different content", h.n)
+	}
 	// A skipped message key decrypts this without advancing anything.
 	if mk, ok := r.skipped[skippedID{dh: h.dh, n: h.n}]; ok {
 		pt, err := Open(mk, ciphertext, ad, header)
@@ -254,7 +292,7 @@ func (r *Ratchet) decrypt(header, ciphertext, ad []byte) ([]byte, error) {
 			return nil, err
 		}
 		delete(r.skipped, skippedID{dh: h.dh, n: h.n})
-		return pt, nil
+		return r.remember(h, adSum, ctSum, pt), nil
 	}
 	if h.dh != r.dhRemote {
 		// New ratchet key from the peer: stash the rest of the current
@@ -276,8 +314,8 @@ func (r *Ratchet) decrypt(header, ciphertext, ad []byte) ([]byte, error) {
 			return nil, err
 		}
 	} else if h.n < r.nRecv {
-		// Already consumed in this chain and not in the skipped map: a
-		// replay the ratchet cannot answer twice.
+		// Consumed in this chain and not in the decrypt cache: a replay
+		// the ratchet cannot answer with its original plaintext.
 		return nil, fmt.Errorf("ratchet: message %d of chain already consumed", h.n)
 	}
 	if !r.hasRecv {
@@ -289,7 +327,25 @@ func (r *Ratchet) decrypt(header, ciphertext, ad []byte) ([]byte, error) {
 	}
 	r.ckRecv = next
 	r.nRecv++
-	return Open(mk, ciphertext, ad, header)
+	pt, err := Open(mk, ciphertext, ad, header)
+	if err != nil {
+		return nil, err
+	}
+	return r.remember(h, adSum, ctSum, pt), nil
+}
+
+// remember caches a decrypted message and returns the plaintext.
+func (r *Ratchet) remember(h ratchetHeader, adSum, ctSum [32]byte, pt []byte) []byte {
+	id := skippedID{dh: h.dh, n: h.n}
+	if _, ok := r.cache[id]; !ok {
+		r.cacheOrder = append(r.cacheOrder, id)
+	}
+	r.cache[id] = cacheEntry{adHash: adSum, ctHash: ctSum, pt: pt}
+	for len(r.cacheOrder) > cacheLimit {
+		delete(r.cache, r.cacheOrder[0])
+		r.cacheOrder = r.cacheOrder[1:]
+	}
+	return pt
 }
 
 // skipMessageKeys stashes message keys 0..until-1 of the current receive
@@ -363,13 +419,14 @@ type ratchetHeader struct {
 	dh        [32]byte
 	pn, n     uint32
 	recipient [16]byte
+	device    [16]byte      // the sending device
 	pre       *PrekeyHeader // set on prekey-type headers
 }
 
 func (h ratchetHeader) isPrekey() bool { return h.pre != nil }
 
-func encodeHeader(dh [32]byte, pn, n uint32, recipient [16]byte) []byte {
-	out := make([]byte, 0, 2+32+4+4+16)
+func encodeHeader(dh [32]byte, pn, n uint32, sender, recipient [16]byte) []byte {
+	out := make([]byte, 0, 2+32+4+4+16+16)
 	out = append(out, ratchetVersion, headerNormal)
 	out = append(out, dh[:]...)
 	var b [4]byte
@@ -378,19 +435,39 @@ func encodeHeader(dh [32]byte, pn, n uint32, recipient [16]byte) []byte {
 	binary.BigEndian.PutUint32(b[:], n)
 	out = append(out, b[:]...)
 	out = append(out, recipient[:]...)
+	out = append(out, sender[:]...)
 	return out
 }
 
-func encodePrekeyHeader(pre PrekeyHeader, dh [32]byte, pn, n uint32, recipient [16]byte) []byte {
-	out := make([]byte, 0, 2+32*3+8+8+32+4+4+16)
+// idToWire converts a prekey id to its big-endian 8 bytes. Ids are
+// validated >= 1 at every entry point (bundle verification, key
+// generation), so the conversion cannot lose information.
+func idToWire(id int64) uint64 {
+	if id < 0 {
+		return 0
+	}
+	return uint64(id)
+}
+
+// wireToID is idToWire's inverse: a wire value above int64's range is a
+// corrupted header.
+func wireToID(u uint64) (int64, error) {
+	if u > math.MaxInt64 {
+		return 0, errors.New("prekey id out of range")
+	}
+	return int64(u), nil
+}
+
+func encodePrekeyHeader(pre PrekeyHeader, dh [32]byte, pn, n uint32, sender, recipient [16]byte) []byte {
+	out := make([]byte, 0, 2+32*3+8+8+32+4+4+16+16)
 	out = append(out, ratchetVersion, headerPrekey)
 	out = append(out, pre.IdentityEd[:]...)
 	out = append(out, pre.IdentityDH[:]...)
 	out = append(out, pre.Ephemeral[:]...)
 	var b [8]byte
-	binary.BigEndian.PutUint64(b[:], uint64(pre.SignedPrekeyID))
+	binary.BigEndian.PutUint64(b[:], idToWire(pre.SignedPrekeyID))
 	out = append(out, b[:]...)
-	binary.BigEndian.PutUint64(b[:], uint64(pre.OneTimePrekeyID))
+	binary.BigEndian.PutUint64(b[:], idToWire(pre.OneTimePrekeyID))
 	out = append(out, b[:]...)
 	out = append(out, dh[:]...)
 	var c [4]byte
@@ -399,6 +476,7 @@ func encodePrekeyHeader(pre PrekeyHeader, dh [32]byte, pn, n uint32, recipient [
 	binary.BigEndian.PutUint32(c[:], n)
 	out = append(out, c[:]...)
 	out = append(out, recipient[:]...)
+	out = append(out, sender[:]...)
 	return out
 }
 
@@ -426,13 +504,14 @@ func decodeHeader(b []byte) (ratchetHeader, error) {
 		if len(b) < at+8 {
 			return 0, fail("truncated")
 		}
-		return int64(binary.BigEndian.Uint64(b[at : at+8])), nil
+		return wireToID(binary.BigEndian.Uint64(b[at : at+8]))
 	}
 	copyRecipient := func(h *ratchetHeader, at int) error {
 		if len(b) < at+16 {
 			return fail("truncated")
 		}
 		copy(h.recipient[:], b[at:at+16])
+		copy(h.device[:], b[at+16:at+32])
 		return nil
 	}
 	switch b[1] {
