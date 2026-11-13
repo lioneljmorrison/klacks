@@ -156,7 +156,8 @@ func TestScyllaLifecycle(t *testing.T) {
 }
 
 // TestEmbeddedMigrations applies the real, embedded migrations to fresh
-// stores, so a bad migration file fails CI.
+// stores, rolls them all back and applies them again, so a bad up or down
+// migration file fails CI.
 func TestEmbeddedMigrations(t *testing.T) {
 	ctx := context.Background()
 	pg, err := migrate.NewPostgres(ctx, dbtest.Postgres(t), migrations.Postgres(), discard)
@@ -164,15 +165,34 @@ func TestEmbeddedMigrations(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = pg.Close() }()
-	if err := pg.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
+	upDownUp(t, pg)
 	sc, err := migrate.NewScylla(ctx, dbtest.Scylla(t), migrations.Scylla(), discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = sc.Close() }()
-	if err := sc.Up(ctx); err != nil {
+	upDownUp(t, sc)
+}
+
+func upDownUp(t *testing.T, m migrate.Migrator) {
+	t.Helper()
+	ctx := context.Background()
+	if err := m.Up(ctx); err != nil {
 		t.Fatal(err)
+	}
+	for {
+		v, _, err := m.Version(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v == 0 {
+			break
+		}
+		if err := m.Down(ctx, 1); err != nil {
+			t.Fatalf("down from version %d: %v", v, err)
+		}
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("up after down: %v", err)
 	}
 }
