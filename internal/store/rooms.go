@@ -132,6 +132,45 @@ func (l *LockedRoom) RemoveMember(ctx context.Context, user UUID) error {
 	return nil
 }
 
+// Role returns user's role in room without taking the room lock: a plain
+// read, for the read authorization behind subscribe and resume. ok is false
+// if user is not a member. It returns ErrRoomNotFound if the room does not
+// exist.
+func (r *Rooms) Role(ctx context.Context, room, user UUID) (role string, ok bool, err error) {
+	err = r.pool.QueryRow(ctx, `SELECT role FROM room_members WHERE room_id = $1 AND user_id = $2`, room, user).Scan(&role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// No member row: either user is not a member or there is no room.
+		// Distinguish for callers, which report the two differently.
+		var exists bool
+		if e := r.pool.QueryRow(ctx, `SELECT true FROM rooms WHERE id = $1`, room).Scan(&exists); errors.Is(e, pgx.ErrNoRows) {
+			return "", false, fmt.Errorf("rooms: %x: %w", room, ErrRoomNotFound)
+		} else if e != nil {
+			return "", false, fmt.Errorf("rooms: exists: %w", e)
+		}
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("rooms: role: %w", err)
+	}
+	return role, true, nil
+}
+
+// Watermark returns the room's committed watermark hi: room_seq.next_seq - 1,
+// read with a plain SELECT, without FOR UPDATE (it does not guard a publish,
+// it only observes it). Every seq <= hi is in the message store; rows above
+// hi may be uncommitted orphans and must never be served.
+func (r *Rooms) Watermark(ctx context.Context, room UUID) (int64, error) {
+	var next int64
+	err := r.pool.QueryRow(ctx, `SELECT next_seq FROM room_seq WHERE room_id = $1`, room).Scan(&next)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("rooms: %x: %w", room, ErrRoomNotFound)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("rooms: watermark: %w", err)
+	}
+	return next - 1, nil
+}
+
 // NextSeq is the seq the next published message gets: the locked
 // room_seq.next_seq. The committed watermark (hi) is NextSeq - 1.
 func (l *LockedRoom) NextSeq() int64 { return l.nextSeq }

@@ -50,13 +50,17 @@ type MemberRemoved struct {
 type Service struct {
 	rooms     *store.Rooms
 	messages  store.MessageStore
+	onPosted  func(context.Context, store.Message)
 	onRemoved func(context.Context, MemberRemoved)
 }
 
-// New returns a Service. onRemoved, if not nil, is called synchronously after
-// each committed removal.
-func New(rooms *store.Rooms, messages store.MessageStore, onRemoved func(context.Context, MemberRemoved)) *Service {
-	return &Service{rooms: rooms, messages: messages, onRemoved: onRemoved}
+// New returns a Service. onPosted, if not nil, is called with each committed
+// message after its publish commits: live fan-out to online subscribers
+// (S-13). The call happens in publish order, so the room's seqs arrive in
+// order. onRemoved, if not nil, is called synchronously after each committed
+// removal.
+func New(rooms *store.Rooms, messages store.MessageStore, onPosted func(context.Context, store.Message), onRemoved func(context.Context, MemberRemoved)) *Service {
+	return &Service{rooms: rooms, messages: messages, onPosted: onPosted, onRemoved: onRemoved}
 }
 
 // CreateRoom creates a room of kind with creator as its owner and returns

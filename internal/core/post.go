@@ -52,6 +52,7 @@ func (s *Service) PostMessage(ctx context.Context, room, sender store.UUID, p Pa
 		return 0, fmt.Errorf("post message: %d bytes > %d: %w", n, MaxPayloadSize, ErrPayloadTooLarge)
 	}
 	var seq int64
+	var committed store.Message
 	err := s.rooms.Locked(ctx, room, func(ctx context.Context, l *store.LockedRoom) error {
 		role, err := memberRole(ctx, l, sender)
 		if err != nil {
@@ -65,7 +66,7 @@ func (s *Service) PostMessage(ctx context.Context, room, sender store.UUID, p Pa
 			return err
 		}
 		seq = l.NextSeq()
-		err = s.messages.Insert(ctx, store.Message{
+		committed = store.Message{
 			RoomID:     room,
 			Seq:        seq,
 			MessageID:  p.MessageID,
@@ -74,7 +75,8 @@ func (s *Service) PostMessage(ctx context.Context, room, sender store.UUID, p Pa
 			Ciphertext: p.Ciphertext,
 			Header:     p.Header,
 			CreatedAt:  time.Now().UTC().Truncate(time.Millisecond),
-		}, ts)
+		}
+		err = s.messages.Insert(ctx, committed, ts)
 		if err != nil {
 			return fmt.Errorf("post message: %w", err)
 		}
@@ -83,6 +85,12 @@ func (s *Service) PostMessage(ctx context.Context, room, sender store.UUID, p Pa
 	if err != nil {
 		return 0, err
 	}
-	// Fan-out to online subscribers (S-13) goes here, after the commit.
+	// Fan-out to online subscribers (S-13), after the commit: the message is
+	// durable, so live delivery never shows a seq above the watermark. In
+	// publish order, because the next publish cannot reach this point until
+	// its room lock, freed by the commit above.
+	if s.onPosted != nil {
+		s.onPosted(ctx, committed)
+	}
 	return seq, nil
 }

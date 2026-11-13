@@ -22,6 +22,40 @@ Servers in any other env do not serve `/ws` yet.
 The server pings every connection. A client that stops answering pings is
 disconnected; it should reconnect and `resume`.
 
+The server may also disconnect a client that cannot keep up (see
+[Backpressure](#backpressure)); the client should reconnect and `resume`.
+
+## Delivery semantics
+
+Messages are fanned out live only after they are durable: a `deliver` frame
+never carries a `seq` above the room's committed watermark, and the seqs of
+a room's deliveries arrive in order, gap-free, exactly once per connection.
+What a connection sees depends on how it joined the room:
+
+- **subscribe** is live-only and best-effort: the subscription is anchored at
+  the room's committed watermark at subscribe time, so messages committed
+  before it are not delivered, and a message that commits while the
+  subscription is being set up may be missed. Clients that must not miss
+  anything use `resume` instead.
+- **resume** never misses anything: it replays every committed message in
+  `(last_seen_seq, hi]` — `hi` being the watermark the replay ends at — and
+  then continues live from there, without a gap or a duplicate. Live
+  fan-out that lands while the replay is running is buffered and merged in
+  order; anything the replay already covered is dropped, not re-sent.
+
+A repeated `resume` re-runs the flow from the given `last_seen_seq`. Sending
+the same `last_seen_seq` again can therefore repeat messages; the client
+sends its actual furthest-seen seq.
+
+`publish` has no confirmation frame in v1: a successful publish reaches its
+sender the way it reaches everyone else, as a `deliver` (live, or replayed by
+a later `resume`). A failed publish is an `error` frame naming the room and
+`message_id`.
+
+`ack` tells the server the client has consumed every seq in the room up to
+`seq`; it lets the server prune its in-memory replay buffer. A client that
+never acks still gets correct delivery; only server memory use grows.
+
 ## Frames
 
 Every frame is one JSON object sent as one WebSocket **text** message:
@@ -47,7 +81,9 @@ Every frame is one JSON object sent as one WebSocket **text** message:
 
 ### Client to server
 
-**subscribe**: deliver the room's new messages live.
+**subscribe**: deliver the room's new messages live. Best-effort (see
+[Delivery semantics](#delivery-semantics)); there is no confirmation frame in
+v1 — delivery itself is the confirmation.
 
 ```json
 {"v":1, "type":"subscribe", "room_id":"…"}
@@ -113,3 +149,16 @@ it answers when the server knows them (`message_id` for a publish).
 | `internal`            | Server error. Details are logged, not sent.                |
 
 `code` values are stable; `message` is for people and may change.
+
+## Backpressure
+
+Each connection has a bounded send queue. If the client consumes frames
+slower than the server produces them and the queue fills, the server
+disconnects it with WebSocket close code **4000** ("slow consumer: reconnect
+and resume"). The client should reconnect and `resume` from the last seq it
+delivered; frames it never received are replayed, frames it did receive are
+not re-sent.
+
+Resume itself can burst more frames than the queue holds when a client is
+far behind: a disconnected client resumes again from its new last seen seq
+and makes progress each round.

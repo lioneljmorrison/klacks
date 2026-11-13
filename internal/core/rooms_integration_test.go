@@ -28,7 +28,7 @@ func (r *removals) hook(_ context.Context, e core.MemberRemoved) { *r = append(*
 
 func newService(t *testing.T, onRemoved func(context.Context, core.MemberRemoved)) *core.Service {
 	t.Helper()
-	return core.New(store.NewRooms(dbtest.MigratedPostgres(t), 10*time.Second), nil, onRemoved)
+	return core.New(store.NewRooms(dbtest.MigratedPostgres(t), 10*time.Second), nil, nil, onRemoved)
 }
 
 func TestCreateRoomKinds(t *testing.T) {

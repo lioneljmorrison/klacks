@@ -34,7 +34,7 @@ func newEnv(t *testing.T, wrap func(store.MessageStore) store.MessageStore) env 
 	if wrap != nil {
 		used = wrap(msgs)
 	}
-	return env{svc: core.New(store.NewRooms(pool, 10*time.Second), used, nil), pool: pool, msgs: msgs}
+	return env{svc: core.New(store.NewRooms(pool, 10*time.Second), used, nil, nil), pool: pool, msgs: msgs}
 }
 
 // hi returns the room's committed watermark, next_seq - 1.
