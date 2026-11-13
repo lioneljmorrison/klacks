@@ -10,17 +10,69 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	gocql "github.com/apache/cassandra-gocql-driver/v2"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/lioneljmorrison/klacks/internal/config"
 	"github.com/lioneljmorrison/klacks/internal/store"
+	"github.com/lioneljmorrison/klacks/internal/store/migrate"
+	"github.com/lioneljmorrison/klacks/migrations"
 )
+
+var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// MigratedPostgres returns a pool on a fresh database with the embedded
+// migrations applied.
+func MigratedPostgres(t testing.TB) *pgxpool.Pool {
+	t.Helper()
+	ctx := context.Background()
+	dsn := Postgres(t)
+	m, err := migrate.NewPostgres(ctx, dsn, migrations.Postgres(), discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = m.Close() }()
+	if err := m.Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := store.OpenPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// MigratedScylla returns a session on a fresh keyspace with the embedded
+// migrations applied.
+func MigratedScylla(t testing.TB) *gocql.Session {
+	t.Helper()
+	ctx := context.Background()
+	cfg := Scylla(t)
+	m, err := migrate.NewScylla(ctx, cfg, migrations.Scylla(), discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = m.Close() }()
+	if err := m.Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.OpenScylla(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	return s
+}
 
 // Postgres creates an empty database for the test, drops it on cleanup, and
 // returns its DSN.
