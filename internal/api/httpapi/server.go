@@ -48,6 +48,10 @@ func NewServer(cfg config.HTTP, health *Health, ws http.Handler, devices *Device
 	}
 }
 
+// Handler returns the server's routes, for tests and for callers that run
+// the handler on their own listener.
+func (s *Server) Handler() http.Handler { return s.srv.Handler }
+
 // OnShutdown registers f to run when shutdown begins, for long-lived
 // connections (such as WebSockets) that Shutdown does not track.
 func (s *Server) OnShutdown(f func()) { s.srv.RegisterOnShutdown(f) }
