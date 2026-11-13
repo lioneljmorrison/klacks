@@ -58,6 +58,12 @@ make up migrate-up
 go run ./examples/meetings
 ```
 
+Encryption happens entirely in client apps: the server never sees plaintext
+and treats all crypto as opaque bytes, so any client library that speaks the
+wire format interoperates. See [docs/protocol.md](docs/protocol.md)
+(§ Encryption) for the wire format, the Go reference implementation, and the
+licensing note on libsignal.
+
 ## Layout
 
 ```

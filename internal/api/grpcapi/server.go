@@ -16,6 +16,7 @@ package grpcapi
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -121,6 +122,118 @@ func (s *Server) Subscribe(req *chatv1.SubscribeRequest, stream grpc.ServerStrea
 		}
 	}
 	return nil
+}
+
+// Device registration and prekey bundles (S-22). RegisterDevice upserts the
+// (user_id, device_id) bundle; DeviceBundle fetches it and consumes one of
+// its one-time prekeys (S-23).
+
+// RegisterDevice registers or replaces user_id's device bundle.
+func (s *Server) RegisterDevice(ctx context.Context, req *chatv1.RegisterDeviceRequest) (*chatv1.RegisterDeviceResponse, error) {
+	u, d, err := uuids("register device", req.GetUserId(), req.GetDeviceId())
+	if err != nil {
+		return nil, err
+	}
+	bundle, prekeys, err := deviceArgs("register device", req.GetBundle(), req.GetOneTimePrekeys(), true)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.chat.RegisterDevice(ctx, chat.UserID(u), chat.DeviceID(d), bundle, prekeys); err != nil {
+		return nil, wrap("register device", err)
+	}
+	return &chatv1.RegisterDeviceResponse{}, nil
+}
+
+// AddDevicePrekeys replenishes user_id's device one-time prekeys.
+func (s *Server) AddDevicePrekeys(ctx context.Context, req *chatv1.AddDevicePrekeysRequest) (*chatv1.AddDevicePrekeysResponse, error) {
+	u, d, err := uuids("add device prekeys", req.GetUserId(), req.GetDeviceId())
+	if err != nil {
+		return nil, err
+	}
+	_, prekeys, err := deviceArgs("add device prekeys", nil, req.GetOneTimePrekeys(), false)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.chat.AddDevicePrekeys(ctx, chat.UserID(u), chat.DeviceID(d), prekeys); err != nil {
+		return nil, wrap("add device prekeys", err)
+	}
+	return &chatv1.AddDevicePrekeysResponse{}, nil
+}
+
+// DeviceBundle fetches user_id's device bundle, consuming one of its
+// one-time prekeys.
+func (s *Server) DeviceBundle(ctx context.Context, req *chatv1.DeviceBundleRequest) (*chatv1.DeviceBundleResponse, error) {
+	u, d, err := uuids("device bundle", req.GetUserId(), req.GetDeviceId())
+	if err != nil {
+		return nil, err
+	}
+	b, taken, err := s.chat.DeviceBundle(ctx, chat.UserID(u), chat.DeviceID(d))
+	if err != nil {
+		return nil, wrap("device bundle", err)
+	}
+	rem := taken.Remaining
+	if rem > math.MaxInt32 {
+		rem = math.MaxInt32
+	}
+	resp := &chatv1.DeviceBundleResponse{
+		Bundle: &chatv1.PrekeyBundle{
+			IdentityKey:           b.IdentityKey,
+			IdentityDhKey:         b.IdentityDHKey,
+			SignedPrekeyId:        b.SignedPrekeyID,
+			SignedPrekey:          b.SignedPrekey,
+			SignedPrekeySignature: b.SignedPrekeySignature,
+		},
+		Remaining: int32(rem),
+	}
+	if taken.ID != 0 {
+		resp.OneTimePrekey = &chatv1.Prekey{Id: taken.ID, Key: taken.Key}
+	}
+	return resp, nil
+}
+
+// ListDevices lists user_id's registered devices.
+func (s *Server) ListDevices(ctx context.Context, req *chatv1.ListDevicesRequest) (*chatv1.ListDevicesResponse, error) {
+	u, err := uuid("list devices", "user_id", req.GetUserId())
+	if err != nil {
+		return nil, invalid(err)
+	}
+	devs, err := s.chat.ListDevices(ctx, chat.UserID(u))
+	if err != nil {
+		return nil, wrap("list devices", err)
+	}
+	out := make([]*chatv1.Device, 0, len(devs))
+	for _, d := range devs {
+		info := &chatv1.Device{DeviceId: d.DeviceID[:]}
+		if d.LastSeen != nil {
+			info.LastSeenAt = timestamppb.New(*d.LastSeen)
+		}
+		out = append(out, info)
+	}
+	return &chatv1.ListDevicesResponse{Devices: out}, nil
+}
+
+// deviceArgs converts proto bundle and prekeys to the chat API's shapes,
+// validating the 32/64-byte key sizes via the service. withBundle validates
+// the bundle too (registration, not replenishment).
+func deviceArgs(op string, b *chatv1.PrekeyBundle, prekeys []*chatv1.Prekey, withBundle bool) (chat.PrekeyBundle, []chat.Prekey, error) {
+	var bundle chat.PrekeyBundle
+	if withBundle {
+		if b == nil {
+			return chat.PrekeyBundle{}, nil, invalid(fmt.Errorf("%s: bundle is required", op))
+		}
+		bundle = chat.PrekeyBundle{
+			IdentityKey:           b.GetIdentityKey(),
+			IdentityDHKey:         b.GetIdentityDhKey(),
+			SignedPrekeyID:        b.GetSignedPrekeyId(),
+			SignedPrekey:          b.GetSignedPrekey(),
+			SignedPrekeySignature: b.GetSignedPrekeySignature(),
+		}
+	}
+	out := make([]chat.Prekey, len(prekeys))
+	for i, p := range prekeys {
+		out[i] = chat.Prekey{ID: p.GetId(), Key: p.GetKey()}
+	}
+	return bundle, out, nil
 }
 
 // toProto converts a delivered chat message to its wire form.

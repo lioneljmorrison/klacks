@@ -106,7 +106,7 @@ func testHTTPConfig() config.HTTP {
 // checks that the request still completes and Serve returns cleanly.
 func TestGracefulShutdown(t *testing.T) {
 	h := NewHealth(nil, time.Second, discard)
-	srv := NewServer(testHTTPConfig(), h, nil, discard)
+	srv := NewServer(testHTTPConfig(), h, nil, nil, discard)
 	started := make(chan struct{})
 	srv.srv.Handler.(*http.ServeMux).HandleFunc("GET /slow", func(w http.ResponseWriter, _ *http.Request) {
 		close(started)
@@ -169,7 +169,7 @@ func TestGracefulShutdown(t *testing.T) {
 func TestShutdownTimeout(t *testing.T) {
 	cfg := testHTTPConfig()
 	cfg.ShutdownTimeout = config.Duration(100 * time.Millisecond)
-	srv := NewServer(cfg, NewHealth(nil, time.Second, discard), nil, discard)
+	srv := NewServer(cfg, NewHealth(nil, time.Second, discard), nil, nil, discard)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	defer close(release)
@@ -207,7 +207,7 @@ func TestShutdownTimeout(t *testing.T) {
 func TestDrainDelay(t *testing.T) {
 	cfg := testHTTPConfig()
 	cfg.DrainDelay = config.Duration(400 * time.Millisecond)
-	srv := NewServer(cfg, NewHealth(nil, time.Second, discard), nil, discard)
+	srv := NewServer(cfg, NewHealth(nil, time.Second, discard), nil, nil, discard)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +240,7 @@ func TestWebSocketRoute(t *testing.T) {
 		ws   http.Handler
 		want int
 	}{{ws, http.StatusTeapot}, {nil, http.StatusNotFound}} {
-		srv := NewServer(testHTTPConfig(), NewHealth(nil, time.Second, discard), tc.ws, discard)
+		srv := NewServer(testHTTPConfig(), NewHealth(nil, time.Second, discard), tc.ws, nil, discard)
 		rec := httptest.NewRecorder()
 		srv.srv.Handler.ServeHTTP(rec, httptest.NewRequest("GET", "/ws", nil))
 		if rec.Code != tc.want {

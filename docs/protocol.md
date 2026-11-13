@@ -162,3 +162,78 @@ not re-sent.
 Resume itself can burst more frames than the queue holds when a client is
 far behind: a disconnected client resumes again from its new last seen seq
 and makes progress each round.
+
+## Encryption
+
+`header` and `ciphertext` are opaque to the server: klacks stores and relays
+them and never decrypts anything. Interop depends only on the wire format,
+not on which crypto library produced the bytes — libsignal, another library,
+or a hand-rolled implementation all interoperate as long as they speak the
+same format (prekey bundle registration and consumption, X3DH initial
+message, Double Ratchet headers, Sender Key distribution blobs, and AEAD
+associated data binding room, sender, sender device, recipient device and
+message id — see below for the resolved envelope).
+
+The Go reference implementation (`client/`, X3DH + Double Ratchet on
+`x/crypto`) is the executable definition of that format and the test
+oracle; `docs/protocol.md` and `internal/protocol` carry the transport side.
+For shipped clients, [libsignal](https://github.com/signalapp/libsignal) is
+the recommended library — note its **AGPL-3.0 license**: distributing a
+client app built on it requires releasing that app's source under AGPL-3.0.
+Projects that cannot accept that must use a differently licensed
+implementation of the same wire format; the server treats them identically.
+
+### Prekey bundles (S-22)
+
+A device uploads its bundle to `PUT /v1/device/bundle` (replenishing with
+`POST /v1/device/prekeys`, fetching with
+`GET /v1/users/{user}/devices/{device}/bundle`, which hands out one
+one-time prekey and deletes it). The bundle:
+
+- `identity_key` — the device's Ed25519 public key; it signs the bundle.
+- `identity_dh_key` — the identity's X25519 (Montgomery) form. X3DH's DHs
+  need the identity key in Curve25519 form, and converting an Ed25519
+  public key requires field arithmetic no mainstream Go library exposes, so
+  the device uploads the Montgomery form itself. The signature covers it,
+  binding it to the identity key: a swapped form cannot be re-signed.
+- `signed_prekey_id`, `signed_prekey` — the device's X25519 signed prekey,
+  per device, from 1.
+- `signed_prekey_signature` — Ed25519 over the length-prefixed
+  `identity_dh_key || signed_prekey`.
+- one-time prekeys — X25519 public keys, per device ids from 1.
+
+This follows the X3DH spec's DH structure (`DH1 = DH(IK, SPK)`,
+`DH2 = DH(EK, IK)`, `DH3 = DH(EK, SPK)`, `DH4 = DH(EK, OPK)` when the
+bundle had a one-time prekey, mixed with a 32-byte `0xFF` prefix into the
+root key via HKDF-SHA256); only the identity-key conversion differs from
+the paper's XEdDSA path.
+
+### AEAD envelope and associated data (S-25)
+
+Each message is ChaCha20-Poly1305 under a Double Ratchet message key. The
+associated data is fixed-width (no parser, unambiguous boundaries):
+
+    version(1) || room_id(16) || sender_id(16) || sender_device_id(16) ||
+    recipient_device_id(16) || message_id(16)
+
+plus the message's ratchet header bytes appended. Two deviations from the
+original plan (`room || sender || device || seq`), both deliberate:
+
+- **`message_id`, not `seq`.** seq is assigned by the server after the WS
+  publish is sent, so the sender cannot know it when it encrypts. The
+  client-generated `message_id` is stored with the message and echoed in
+  every `deliver`, so it is authenticated on arrival like the rest.
+- **`recipient_device_id`** is bound so a receiver drops other members'
+  copies of a room message before its ratchet state is touched.
+
+`seq` is verified separately, against the room's server-owned ordering
+promise: per room, gap-free, strictly increasing, one message id per seq.
+Tampering with a stored seq therefore shows up as a gap or a duplicate id
+and the client rejects the stream — which is what the tamper-detection
+tests (S-26) assert for every bound field.
+
+Nonce uniqueness: the message key and its nonce are derived together from
+one KDF step of the ratchet chain, so a `(key, nonce)` pair can never
+repeat. Any change to the envelope requires a code review that states its
+`(key, nonce)`-reuse and associated-data consequences (the gate comment on
+`client/envelope.go`).
