@@ -18,6 +18,13 @@ You are handed a plan. Implement it faithfully.
   written, stop and report the problem instead of improvising a different
   design. Small, obvious adjustments (a renamed variable, a missing import)
   are fine — mention them in your report.
+- TDD: for each behaviour, write the failing test first, run it and
+  confirm it fails for the expected reason, then write the minimum code to
+  make it pass, then refactor. Report the failing run as well as the pass.
+- YAGNI: implement only what the plan asks for. No extra options,
+  abstractions or "while I'm here" additions.
+- Don't guess. If the plan is ambiguous or a fact is unknown, stop and
+  report the question rather than assuming.
 - Match the existing code style; run `gofmt -w` on files you touch.
 - After changes, run `go build ./...`, `go vet ./...` and `go test ./...`
   (or the Makefile targets, if a Makefile exists). Use `-race` for anything

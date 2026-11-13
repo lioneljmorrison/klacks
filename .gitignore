@@ -4,3 +4,5 @@
 bin/
 coverage.out
 !.env.example
+docs/Prop*.md
+docs/Sec*.md

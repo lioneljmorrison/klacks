@@ -4,6 +4,20 @@ A self-hosted, embeddable messaging core in Go with Signal-protocol
 end-to-end encryption. The design lives in
 "Secure Messaging Core — Implementation Plan.md".
 
+## Working rules
+
+- **Don't guess.** If something is unclear or unknown, research it (the
+  code, the implementation plan, primary sources such as the Signal specs)
+  and ask rather than assuming. Crypto especially: never fill gaps from memory.
+- **YAGNI.** Build only what the current story needs. The simple solution is
+  usually the right one; no speculative abstractions, options or layers.
+- **TDD.** Write a failing test first, run it and see it fail, then write
+  the code that makes it pass, then refactor.
+- **Testing.** Verify with Bash (`go build ./...`, `go vet ./...`,
+  `go test ./...`, `-race` where concurrency is involved) and, for anything
+  in a browser, the Playwright MCP tools. Don't claim something works
+  without having run it.
+
 ## Branches and releases
 
 - `dev` is the working branch. Task branches start from `dev`, and their PRs

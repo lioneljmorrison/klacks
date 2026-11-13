@@ -27,7 +27,13 @@ follow without needing to re-derive anything. You do not edit files.
    PostgreSQL semantics, Signal spec details) that you cannot settle from
    the repo, list them under "Open research questions" — the orchestrator
    will hand them to the `researcher` agent.
-4. Weigh alternatives briefly, then commit to one recommendation.
+4. Weigh alternatives briefly, then commit to one recommendation. Prefer
+   the simplest design that meets the story (YAGNI): no speculative
+   abstractions, options or layers for later phases.
+5. Plan test-first (TDD): each step starts with the failing test to write,
+   then the code that makes it pass.
+6. Don't guess. Anything you can't settle from the repo or the plan, list
+   as an open research question or a question for the user.
 
 ## Output format
 
