@@ -11,9 +11,9 @@ import (
 )
 
 var (
-	ErrRoomNotFound  = errors.New("room not found")
-	ErrAlreadyMember = errors.New("already a member")
-	ErrNotMember     = errors.New("not a member")
+	ErrRoomNotFound   = errors.New("room not found")
+	ErrAlreadyMember  = errors.New("already a member")
+	ErrMemberNotFound = errors.New("member not found")
 )
 
 // uniqueViolation is the PostgreSQL SQLSTATE for a unique constraint failure.
@@ -100,14 +100,14 @@ func (l *LockedRoom) AddMember(ctx context.Context, user UUID, role string) erro
 	return nil
 }
 
-// RemoveMember removes user. It returns ErrNotMember if user is not a member.
+// RemoveMember removes user. It returns ErrMemberNotFound if user is not a member.
 func (l *LockedRoom) RemoveMember(ctx context.Context, user UUID) error {
 	tag, err := l.tx.Exec(ctx, `DELETE FROM room_members WHERE room_id = $1 AND user_id = $2`, l.room, user)
 	if err != nil {
 		return fmt.Errorf("rooms: remove member: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("rooms: remove member: %w", ErrNotMember)
+		return fmt.Errorf("rooms: remove member: %w", ErrMemberNotFound)
 	}
 	return nil
 }

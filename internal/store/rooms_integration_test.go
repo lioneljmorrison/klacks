@@ -94,8 +94,8 @@ func TestRoomsMembership(t *testing.T) {
 		t.Fatal("removed member still has a role")
 	}
 	err = locked(func(ctx context.Context, l *store.LockedRoom) error { return l.RemoveMember(ctx, user) })
-	if !errors.Is(err, store.ErrNotMember) {
-		t.Fatalf("remove non-member: err = %v, want ErrNotMember", err)
+	if !errors.Is(err, store.ErrMemberNotFound) {
+		t.Fatalf("remove non-member: err = %v, want ErrMemberNotFound", err)
 	}
 }
 

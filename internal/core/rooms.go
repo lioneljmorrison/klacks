@@ -12,7 +12,7 @@ var (
 	ErrInvalidArgument = errors.New("invalid argument")
 	ErrRoomNotFound    = store.ErrRoomNotFound
 	ErrAlreadyMember   = store.ErrAlreadyMember
-	ErrNotMember       = store.ErrNotMember
+	ErrMemberNotFound  = store.ErrMemberNotFound
 )
 
 // Kind is a room kind (plan §3.2).
@@ -39,10 +39,11 @@ func (r Role) valid() bool { return r == RoleOwner || r == RoleAdmin || r == Rol
 
 // MemberRemoved is the membership-change event RemoveMember emits after its
 // transaction commits. Sender Key rotation (S-29) and the audit log (S-33)
-// consume it.
+// consume it. Actor == User when a member leaves.
 type MemberRemoved struct {
-	Room store.UUID
-	User store.UUID
+	Room  store.UUID
+	User  store.UUID
+	Actor store.UUID
 }
 
 // Service is the room and membership core.
@@ -66,26 +67,61 @@ func (s *Service) CreateRoom(ctx context.Context, kind Kind, creator store.UUID)
 	return s.rooms.CreateRoom(ctx, string(kind), creator, string(RoleOwner))
 }
 
-// AddMember adds user to room with role.
-func (s *Service) AddMember(ctx context.Context, room, user store.UUID, role Role) error {
+// AddMember adds user to room with role, if actor may grant it.
+func (s *Service) AddMember(ctx context.Context, room, actor, user store.UUID, role Role) error {
 	if !role.valid() {
 		return fmt.Errorf("add member: role %q: %w", role, ErrInvalidArgument)
 	}
 	return s.rooms.Locked(ctx, room, func(ctx context.Context, l *store.LockedRoom) error {
+		actorRole, err := memberRole(ctx, l, actor)
+		if err != nil {
+			return err
+		}
+		if err := authorize(request{actor: actorRole, action: actAdd, target: role}); err != nil {
+			return fmt.Errorf("add member: %w", err)
+		}
 		return l.AddMember(ctx, user, string(role))
 	})
 }
 
-// RemoveMember removes user from room, then emits MemberRemoved.
-func (s *Service) RemoveMember(ctx context.Context, room, user store.UUID) error {
+// RemoveMember removes user from room, if actor may remove them, then emits
+// MemberRemoved. A member may always remove themself (leave).
+func (s *Service) RemoveMember(ctx context.Context, room, actor, user store.UUID) error {
 	err := s.rooms.Locked(ctx, room, func(ctx context.Context, l *store.LockedRoom) error {
+		actorRole, err := memberRole(ctx, l, actor)
+		if err != nil {
+			return err
+		}
+		if actorRole == "" {
+			return fmt.Errorf("remove member: %w", ErrNotMember)
+		}
+		target, err := memberRole(ctx, l, user)
+		if err != nil {
+			return err
+		}
+		if target == "" {
+			return fmt.Errorf("remove member: %w", ErrMemberNotFound)
+		}
+		if err := authorize(request{actor: actorRole, action: actRemove, target: target, self: actor == user}); err != nil {
+			return fmt.Errorf("remove member: %w", err)
+		}
 		return l.RemoveMember(ctx, user)
 	})
 	if err != nil {
 		return err
 	}
 	if s.onRemoved != nil {
-		s.onRemoved(ctx, MemberRemoved{Room: room, User: user})
+		s.onRemoved(ctx, MemberRemoved{Room: room, User: user, Actor: actor})
 	}
 	return nil
+}
+
+// memberRole returns user's role in the locked room, or "" if user is not a
+// member.
+func memberRole(ctx context.Context, l *store.LockedRoom, user store.UUID) (Role, error) {
+	r, ok, err := l.Role(ctx, user)
+	if err != nil || !ok {
+		return "", err
+	}
+	return Role(r), nil
 }

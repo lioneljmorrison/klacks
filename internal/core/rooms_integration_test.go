@@ -52,33 +52,92 @@ func TestMembershipLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := svc.AddMember(ctx, room, alice, core.RoleMember); err != nil {
+	if err := svc.AddMember(ctx, room, owner, alice, core.RoleMember); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.AddMember(ctx, room, alice, core.RoleAdmin); !errors.Is(err, core.ErrAlreadyMember) {
+	if err := svc.AddMember(ctx, room, owner, alice, core.RoleAdmin); !errors.Is(err, core.ErrAlreadyMember) {
 		t.Fatalf("re-add: err = %v, want ErrAlreadyMember", err)
 	}
-	if err := svc.AddMember(ctx, room, bob, "superuser"); !errors.Is(err, core.ErrInvalidArgument) {
+	if err := svc.AddMember(ctx, room, owner, bob, "superuser"); !errors.Is(err, core.ErrInvalidArgument) {
 		t.Fatalf("unknown role: err = %v, want ErrInvalidArgument", err)
 	}
-	if err := svc.AddMember(ctx, id(0xee), bob, core.RoleMember); !errors.Is(err, core.ErrRoomNotFound) {
+	if err := svc.AddMember(ctx, id(0xee), owner, bob, core.RoleMember); !errors.Is(err, core.ErrRoomNotFound) {
 		t.Fatalf("missing room: err = %v, want ErrRoomNotFound", err)
 	}
 
-	if err := svc.RemoveMember(ctx, room, alice); err != nil {
+	if err := svc.RemoveMember(ctx, room, owner, alice); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0] != (core.MemberRemoved{Room: room, User: alice}) {
-		t.Fatalf("events = %+v, want one removal of alice", got)
+	if len(got) != 1 || got[0] != (core.MemberRemoved{Room: room, User: alice, Actor: owner}) {
+		t.Fatalf("events = %+v, want one removal of alice by owner", got)
 	}
-	if err := svc.RemoveMember(ctx, room, alice); !errors.Is(err, core.ErrNotMember) {
-		t.Fatalf("remove twice: err = %v, want ErrNotMember", err)
+	if err := svc.RemoveMember(ctx, room, owner, alice); !errors.Is(err, core.ErrMemberNotFound) {
+		t.Fatalf("remove twice: err = %v, want ErrMemberNotFound", err)
 	}
 	if len(got) != 1 {
 		t.Fatalf("failed removal emitted an event: %+v", got)
 	}
 	// Removed members can be added back.
-	if err := svc.AddMember(ctx, room, alice, core.RoleMember); err != nil {
+	if err := svc.AddMember(ctx, room, owner, alice, core.RoleMember); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestMembershipAuthorization checks that AddMember and RemoveMember enforce
+// the authorizer against roles read from the database, including for a
+// removed member. The full role matrix is in TestAuthorize.
+func TestMembershipAuthorization(t *testing.T) {
+	var got removals
+	svc := newService(t, got.hook)
+	ctx := context.Background()
+	admin, member, gone, outsider := id(0xc1), id(0xc2), id(0xc3), id(0xc4)
+	room, err := svc.CreateRoom(ctx, core.KindGroup, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for user, role := range map[store.UUID]core.Role{admin: core.RoleAdmin, member: core.RoleMember, gone: core.RoleMember} {
+		if err := svc.AddMember(ctx, room, owner, user, role); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := svc.RemoveMember(ctx, room, gone, gone); err != nil {
+		t.Fatalf("member leaving: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		do   func() error
+		want error
+	}{
+		{"admin adds member", func() error { return svc.AddMember(ctx, room, admin, alice, core.RoleMember) }, nil},
+		{"admin adds admin", func() error { return svc.AddMember(ctx, room, admin, bob, core.RoleAdmin) }, core.ErrForbidden},
+		{"member adds member", func() error { return svc.AddMember(ctx, room, member, bob, core.RoleMember) }, core.ErrForbidden},
+		{"outsider adds member", func() error { return svc.AddMember(ctx, room, outsider, bob, core.RoleMember) }, core.ErrNotMember},
+		{"removed member adds member", func() error { return svc.AddMember(ctx, room, gone, bob, core.RoleMember) }, core.ErrNotMember},
+		{"removed member removes member", func() error { return svc.RemoveMember(ctx, room, gone, member) }, core.ErrNotMember},
+		{"member removes member", func() error { return svc.RemoveMember(ctx, room, member, alice) }, core.ErrForbidden},
+		{"admin removes owner", func() error { return svc.RemoveMember(ctx, room, admin, owner) }, core.ErrForbidden},
+		{"admin removes non-member", func() error { return svc.RemoveMember(ctx, room, admin, outsider) }, core.ErrMemberNotFound},
+		{"admin removes member", func() error { return svc.RemoveMember(ctx, room, admin, alice) }, nil},
+		{"owner removes admin", func() error { return svc.RemoveMember(ctx, room, owner, admin) }, nil},
+	}
+	for _, tt := range tests {
+		err := tt.do()
+		if tt.want == nil && err != nil || tt.want != nil && !errors.Is(err, tt.want) {
+			t.Errorf("%s: err = %v, want %v", tt.name, err, tt.want)
+		}
+	}
+	want := []core.MemberRemoved{
+		{Room: room, User: gone, Actor: gone},
+		{Room: room, User: alice, Actor: admin},
+		{Room: room, User: admin, Actor: owner},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("events = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("events = %+v, want %+v", got, want)
+		}
 	}
 }
