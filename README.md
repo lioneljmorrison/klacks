@@ -45,11 +45,25 @@ The Compose stack publishes Postgres on `127.0.0.1:55432` (clear of a local
 Postgres on 5432) and ScyllaDB on `127.0.0.1:9042`. Override them with
 `KLACKS_DEV_POSTGRES_PORT` and `KLACKS_DEV_SCYLLA_PORT`.
 
+## Embedding
+
+`pkg/chat` is importable: open a `ChatService` on both migrated stores,
+create rooms, add members, post, and subscribe. [examples/meetings](examples/meetings)
+is a toy meeting scheduler that shows the whole flow — a meeting's room is
+created when the meeting is, its attendees join, and its messages arrive
+live:
+
+```sh
+make up migrate-up
+go run ./examples/meetings
+```
+
 ## Layout
 
 ```
 cmd/klacks           the server binary (serve, migrate, config)
 api/proto            protobuf definitions; api/gen holds generated code
+examples/meetings    the toy meeting scheduler, an embedding example
 internal/config      configuration loading and validation
 internal/logging     slog setup (text in dev, JSON in prod)
 internal/api         transports (HTTP now; WebSocket and gRPC later)
