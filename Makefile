@@ -9,6 +9,11 @@ PKG       := ./...
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS   := -s -w -X main.version=$(VERSION)
 
+# Local settings: copy .env.example to .env. Its KLACKS_* variables are
+# exported to every recipe (klacks, migrate, integration tests).
+-include .env
+export $(filter KLACKS_%,$(.VARIABLES))
+
 # Tools are installed into bin/ with the project's Go toolchain, so they always
 # understand the go.mod language version.
 GOLANGCI_LINT_VERSION := v2.15.0
@@ -31,6 +36,14 @@ build: ## Build the klacks binary into bin/
 .PHONY: run
 run: build ## Build and run `klacks serve`
 	$(BINARY) serve
+
+.PHONY: config
+config: build ## Validate and print the effective configuration
+	$(BINARY) config
+
+.PHONY: env
+env: ## Create .env from .env.example (keeps an existing .env)
+	@if [ -e .env ]; then echo ".env exists; leaving it alone"; else cp .env.example .env && echo "created .env"; fi
 
 .PHONY: clean
 clean: ## Remove build output

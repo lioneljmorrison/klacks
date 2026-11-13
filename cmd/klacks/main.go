@@ -2,28 +2,66 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/lioneljmorrison/klacks/internal/config"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
 var version = "dev"
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
+func run(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("klacks", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() { usage(stderr) }
+	configPath := fs.String("config", getenv("KLACKS_CONFIG"), "path to a JSON config file (env: KLACKS_CONFIG)")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	args = fs.Args()
 	if len(args) == 0 {
 		usage(stderr)
 		return 2
 	}
+
+	load := func() (config.Config, bool) {
+		cfg, err := config.Load(*configPath, getenv)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return config.Config{}, false
+		}
+		return cfg, true
+	}
+
 	switch args[0] {
 	case "version":
 		fmt.Fprintln(stdout, version)
 		return 0
-	case "help", "-h", "--help":
+	case "config":
+		cfg, ok := load()
+		if !ok {
+			return 1
+		}
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(cfg.Redacted()); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	case "help":
 		usage(stdout)
 		return 0
 	default:
@@ -34,10 +72,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `Usage: klacks <command>
+	fmt.Fprint(w, `Usage: klacks [-config file.json] <command>
 
 Commands:
+  config     Validate and print the effective configuration (secrets redacted)
   version    Print the version
   help       Show this help
+
+Configuration comes from defaults, then the optional JSON file, then KLACKS_*
+environment variables. See .env.example.
 `)
 }
