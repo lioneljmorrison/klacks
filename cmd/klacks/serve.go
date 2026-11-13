@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/lioneljmorrison/klacks/internal/api/httpapi"
 	"github.com/lioneljmorrison/klacks/internal/api/ws"
 	"github.com/lioneljmorrison/klacks/internal/auth"
 	"github.com/lioneljmorrison/klacks/internal/config"
+	"github.com/lioneljmorrison/klacks/internal/core"
 	"github.com/lioneljmorrison/klacks/internal/store"
 )
 
@@ -42,7 +44,13 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		wsHandler http.Handler
 	)
 	if a := clientAuthenticator(cfg.Env); a != nil {
+		rooms := store.NewRooms(pg, roomLockTimeout)
+		messages := store.NewScyllaMessages(scylla)
 		mgr = ws.NewManager(a, log)
+		// Fan-out goes through the manager: after each commit the core
+		// hands the message to the hub (S-13).
+		svc := core.New(rooms, messages, mgr.Deliver, nil)
+		mgr.Chat = svc
 		wsHandler = mgr
 		log.Warn("client auth is the dev stub: any claimed identity is trusted")
 	} else {
@@ -62,6 +70,11 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	log.Info("klacks stopped")
 	return nil
 }
+
+// roomLockTimeout bounds every publish's and membership change's room lock
+// (store.NewRooms). It must be longer than the ScyllaDB write timeout, since
+// a publish holds the lock across its ScyllaDB write.
+const roomLockTimeout = 10 * time.Second
 
 // clientAuthenticator returns the authenticator for client connections, or
 // nil if there is none. The dev stub trusts any claimed identity, so it is
