@@ -19,6 +19,10 @@ export $(filter KLACKS_%,$(.VARIABLES))
 GOLANGCI_LINT_VERSION := v2.15.0
 GOLANGCI_LINT         := $(BIN_DIR)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
+BUF_VERSION            := v1.75.0
+PROTOC_GEN_GO_VERSION  := v1.36.12
+PROTOC_GEN_GRPC_VERSION := v1.6.2
+
 ##@ General
 
 .PHONY: help
@@ -127,6 +131,24 @@ $(GOLANGCI_LINT):
 	@mkdir -p $(BIN_DIR)
 	GOBIN=$(abspath $(BIN_DIR)) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	mv $(BIN_DIR)/golangci-lint $@
+
+$(BIN_DIR)/buf:
+	@mkdir -p $(BIN_DIR)
+	GOBIN=$(abspath $(BIN_DIR)) go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
+
+# The plugins are .PHONY so a version bump above reinstalls them.
+.PHONY: $(BIN_DIR)/protoc-gen-go $(BIN_DIR)/protoc-gen-go-grpc
+$(BIN_DIR)/protoc-gen-go:
+	GOBIN=$(abspath $(BIN_DIR)) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+$(BIN_DIR)/protoc-gen-go-grpc:
+	GOBIN=$(abspath $(BIN_DIR)) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GRPC_VERSION)
+
+##@ Proto
+
+.PHONY: proto
+proto: $(BIN_DIR)/buf | $(BIN_DIR)/protoc-gen-go $(BIN_DIR)/protoc-gen-go-grpc ## Lint the protos and regenerate api/gen
+	PATH="$(abspath $(BIN_DIR)):$(PATH)" $(BIN_DIR)/buf lint api/proto
+	PATH="$(abspath $(BIN_DIR)):$(PATH)" $(BIN_DIR)/buf generate api/proto
 
 .PHONY: test
 test: ## Run unit tests (no databases needed)

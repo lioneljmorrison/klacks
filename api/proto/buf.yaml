@@ -1,0 +1,6 @@
+version: v2
+lint:
+  # Message is Subscribe's response type on purpose: it mirrors
+  # pkg/chat.Message, which the service mirrors one to one.
+  except:
+    - RPC_RESPONSE_STANDARD_NAME

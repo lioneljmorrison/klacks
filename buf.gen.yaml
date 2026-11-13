@@ -1,0 +1,9 @@
+# Codegen for the protos under api/proto: run `make proto`.
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: api/gen
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: api/gen
+    opt: paths=source_relative
