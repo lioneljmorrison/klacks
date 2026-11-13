@@ -20,10 +20,14 @@ type Server struct {
 	log    *slog.Logger
 }
 
-// NewServer builds the server and its routes.
-func NewServer(cfg config.HTTP, health *Health, log *slog.Logger) *Server {
+// NewServer builds the server and its routes. ws serves GET /ws; if it is
+// nil, /ws is not mounted.
+func NewServer(cfg config.HTTP, health *Health, ws http.Handler, log *slog.Logger) *Server {
 	mux := http.NewServeMux()
 	health.Register(mux)
+	if ws != nil {
+		mux.Handle("GET /ws", ws)
+	}
 	return &Server{
 		cfg:    cfg,
 		health: health,
