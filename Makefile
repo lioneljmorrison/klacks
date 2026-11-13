@@ -49,6 +49,62 @@ env: ## Create .env from .env.example (keeps an existing .env)
 clean: ## Remove build output
 	rm -rf $(BIN_DIR) coverage.out
 
+##@ Local stack (Docker Compose: PostgreSQL + ScyllaDB)
+
+.PHONY: up
+up: ## Start Postgres and ScyllaDB and wait until healthy (~30s cold)
+	docker compose up -d --wait
+
+.PHONY: down
+down: ## Stop the stack (keeps data)
+	docker compose down
+
+.PHONY: nuke
+nuke: ## Stop the stack and DELETE its data volumes
+	docker compose down -v
+
+.PHONY: ps
+ps: ## Show stack status
+	docker compose ps
+
+.PHONY: logs
+logs: ## Follow stack logs (SERVICE=postgres|scylla to pick one)
+	docker compose logs -f $(SERVICE)
+
+.PHONY: psql
+psql: ## Open psql on the local Postgres
+	docker compose exec postgres psql -U klacks -d klacks
+
+.PHONY: cqlsh
+cqlsh: ## Open cqlsh on the local ScyllaDB
+	docker compose exec scylla cqlsh
+
+##@ Migrations (STORE=all|postgres|scylla)
+
+STORE ?= all
+N     ?= 1
+
+.PHONY: migrate-up
+migrate-up: build ## Apply pending migrations
+	$(BINARY) migrate -store $(STORE) up
+
+.PHONY: migrate-down
+migrate-down: build ## Roll back N (default 1) migrations; needs STORE
+	$(BINARY) migrate -store $(STORE) down $(N)
+
+.PHONY: migrate-version
+migrate-version: build ## Show applied versions
+	$(BINARY) migrate -store $(STORE) version
+
+.PHONY: migrate-force
+migrate-force: build ## After a manual repair, mark TO applied and clean; needs STORE
+	@test -n "$(TO)" || { echo "usage: make migrate-force STORE=postgres|scylla TO=<version>"; exit 2; }
+	$(BINARY) migrate -store $(STORE) force $(TO)
+
+.PHONY: migrate-create
+migrate-create: ## New empty migration pair: STORE=postgres|scylla NAME=short_name
+	@scripts/new-migration.sh $(STORE) $(NAME)
+
 ##@ Quality
 
 .PHONY: fmt
@@ -61,7 +117,7 @@ tidy: ## Tidy go.mod and go.sum
 
 .PHONY: vet
 vet: ## Run go vet
-	go vet $(PKG)
+	go vet -tags integration $(PKG)
 
 .PHONY: lint
 lint: $(GOLANGCI_LINT) ## Run golangci-lint
@@ -75,6 +131,12 @@ $(GOLANGCI_LINT):
 .PHONY: test
 test: ## Run unit tests (no databases needed)
 	go test -race -count=1 $(PKG)
+
+.PHONY: test-integration
+test-integration: ## Unit + integration tests against the local stack (run `make up` first)
+	KLACKS_TEST_POSTGRES_DSN="$${KLACKS_TEST_POSTGRES_DSN:-$$KLACKS_POSTGRES_DSN}" \
+	KLACKS_TEST_SCYLLA_HOSTS="$${KLACKS_TEST_SCYLLA_HOSTS:-$$KLACKS_SCYLLA_HOSTS}" \
+	go test -race -count=1 -tags integration $(PKG)
 
 .PHONY: cover
 cover: ## Run unit tests with a coverage report

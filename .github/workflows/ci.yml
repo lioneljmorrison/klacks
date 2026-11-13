@@ -23,3 +23,21 @@ jobs:
         run: make build
       - name: vet + lint + test
         run: make check
+
+  integration:
+    name: integration tests (Postgres + ScyllaDB)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Start stack
+        run: make env up
+      - name: Migrate (twice, to prove it is idempotent)
+        run: make migrate-up && make migrate-up
+      - name: Integration tests
+        run: make test-integration
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose logs

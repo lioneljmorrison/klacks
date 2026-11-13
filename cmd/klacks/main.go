@@ -2,14 +2,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/lioneljmorrison/klacks/internal/config"
+	"github.com/lioneljmorrison/klacks/internal/logging"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -61,6 +65,19 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 			return 1
 		}
 		return 0
+	case "migrate":
+		cfg, ok := load()
+		if !ok {
+			return 1
+		}
+		log, err := logging.New(stderr, cfg.Log.Level, cfg.Log.Format)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return cmdMigrate(ctx, cfg, log, args[1:], stdout, stderr)
 	case "help":
 		usage(stdout)
 		return 0
@@ -75,6 +92,8 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `Usage: klacks [-config file.json] <command>
 
 Commands:
+  migrate    Apply schema migrations to PostgreSQL and ScyllaDB
+             (klacks migrate -h for actions)
   config     Validate and print the effective configuration (secrets redacted)
   version    Print the version
   help       Show this help
