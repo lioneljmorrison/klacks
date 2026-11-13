@@ -40,7 +40,10 @@ Every frame is one JSON object sent as one WebSocket **text** message:
   base64 (with padding).
 - `seq` is a message's position in its room: per room, gap-free, from 1.
 - A frame may be at most 88,412 bytes. Larger frames close the connection
-  (WebSocket status 1009). Do not pad frames with whitespace.
+  (WebSocket status 1009). The limit fits the largest payload only when
+  frames are compact: no whitespace padding, and no escaping of characters
+  that need none. Some JSON encoders write `/` (common in base64) as `\/`
+  by default; turn that off.
 
 ### Client to server
 
