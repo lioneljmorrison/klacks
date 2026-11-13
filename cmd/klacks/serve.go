@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/lioneljmorrison/klacks/internal/api/httpapi"
+	"github.com/lioneljmorrison/klacks/internal/auth"
 	"github.com/lioneljmorrison/klacks/internal/config"
 	"github.com/lioneljmorrison/klacks/internal/store"
 )
@@ -39,5 +40,15 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		return err
 	}
 	log.Info("klacks stopped")
+	return nil
+}
+
+// clientAuthenticator returns the authenticator for client connections, or
+// nil if there is none. The dev stub trusts any claimed identity, so it is
+// only used when env is dev; other envs get none until real auth (S-31).
+func clientAuthenticator(env string) auth.Authenticator {
+	if env == config.EnvDev {
+		return auth.Dev{}
+	}
 	return nil
 }
