@@ -17,9 +17,11 @@ import (
 // store errors are not for the client to interpret.
 func errorFor(err error) codes.Code {
 	switch {
-	case errors.Is(err, chat.ErrInvalidArgument), errors.Is(err, chat.ErrPayloadTooLarge):
+	case errors.Is(err, chat.ErrInvalidArgument), errors.Is(err, chat.ErrPayloadTooLarge),
+		errors.Is(err, chat.ErrInvalidBundle):
 		return codes.InvalidArgument
-	case errors.Is(err, chat.ErrRoomNotFound), errors.Is(err, chat.ErrMemberNotFound):
+	case errors.Is(err, chat.ErrRoomNotFound), errors.Is(err, chat.ErrMemberNotFound),
+		errors.Is(err, chat.ErrDeviceNotFound):
 		return codes.NotFound
 	case errors.Is(err, chat.ErrAlreadyMember):
 		return codes.AlreadyExists

@@ -21,12 +21,16 @@ type Server struct {
 }
 
 // NewServer builds the server and its routes. ws serves GET /ws; if it is
-// nil, /ws is not mounted.
-func NewServer(cfg config.HTTP, health *Health, ws http.Handler, log *slog.Logger) *Server {
+// nil, /ws is not mounted. devices serves the prekey bundle endpoints; if it
+// is nil, they are not mounted.
+func NewServer(cfg config.HTTP, health *Health, ws http.Handler, devices *Devices, log *slog.Logger) *Server {
 	mux := http.NewServeMux()
 	health.Register(mux)
 	if ws != nil {
 		mux.Handle("GET /ws", ws)
+	}
+	if devices != nil {
+		devices.Register(mux)
 	}
 	return &Server{
 		cfg:    cfg,

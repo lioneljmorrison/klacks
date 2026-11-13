@@ -50,6 +50,24 @@ type fakeChat struct {
 	subErr     error
 	subCh      chan chat.Message
 	subDiscard bool
+
+	// Device registration and prekey bundles (S-22).
+	regUser          chat.UserID
+	regDevice        chat.DeviceID
+	regBundle        chat.PrekeyBundle
+	regPrekeys       []chat.Prekey
+	regErr           error
+	addPrekeysUser   chat.UserID
+	addPrekeysDevice chat.DeviceID
+	addPrekeys       []chat.Prekey
+	bundleUser       chat.UserID
+	bundleDevice     chat.DeviceID
+	bundleOut        chat.PrekeyBundle
+	takenOut         chat.ConsumedPrekey
+	bundleErr        error
+	listUser         chat.UserID
+	listOut          []chat.DeviceInfo
+	listErr          error
 }
 
 var _ chat.ChatService = (*fakeChat)(nil)
@@ -95,6 +113,40 @@ func (f *fakeChat) Subscribe(ctx context.Context, r chat.RoomID, from chat.Seq) 
 		return nil, nil
 	}
 	return f.subCh, nil
+}
+
+// Device methods: the fake records calls and answers with the registered
+// bundle, so the adapter tests can check conversion in both directions.
+
+var (
+	regUser   = chat.UserID{15: 0x02}
+	regDevice = chat.DeviceID{14: 0x22}
+)
+
+func (f *fakeChat) RegisterDevice(_ context.Context, u chat.UserID, d chat.DeviceID, b chat.PrekeyBundle, prekeys []chat.Prekey) error {
+	f.regUser, f.regDevice, f.regBundle, f.regPrekeys = u, d, b, prekeys
+	return f.regErr
+}
+
+func (f *fakeChat) DeviceBundle(_ context.Context, u chat.UserID, d chat.DeviceID) (chat.PrekeyBundle, chat.ConsumedPrekey, error) {
+	f.bundleUser, f.bundleDevice = u, d
+	if f.bundleErr != nil {
+		return chat.PrekeyBundle{}, chat.ConsumedPrekey{}, f.bundleErr
+	}
+	return f.bundleOut, f.takenOut, nil
+}
+
+func (f *fakeChat) AddDevicePrekeys(_ context.Context, u chat.UserID, d chat.DeviceID, prekeys []chat.Prekey) error {
+	f.addPrekeysUser, f.addPrekeysDevice, f.addPrekeys = u, d, prekeys
+	return f.regErr
+}
+
+func (f *fakeChat) ListDevices(_ context.Context, u chat.UserID) ([]chat.DeviceInfo, error) {
+	f.listUser = u
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.listOut, nil
 }
 
 // fakeStream is the server stream Subscribe writes to. The embedded
@@ -373,5 +425,101 @@ func TestSubscribeStreamContext(t *testing.T) {
 	_ = grpcapi.New(f).Subscribe(&chatv1.SubscribeRequest{RoomId: b16(0x01)}, st)
 	if !f.subCtxCancel {
 		t.Error("the subscription context was not the canceled stream context")
+	}
+}
+
+// deviceBundle is a valid-shaped proto bundle.
+func deviceBundle() *chatv1.PrekeyBundle {
+	return &chatv1.PrekeyBundle{
+		IdentityKey:           make([]byte, 32),
+		IdentityDhKey:         make([]byte, 32),
+		SignedPrekeyId:        3,
+		SignedPrekey:          make([]byte, 32),
+		SignedPrekeySignature: make([]byte, 64),
+	}
+}
+
+// TestDeviceRPCs checks request and response conversion for the device
+// registration and prekey endpoints.
+func TestDeviceRPCs(t *testing.T) {
+	f, _ := happyChat()
+	s := grpcapi.New(f)
+	ctx := context.Background()
+
+	if _, err := s.RegisterDevice(ctx, &chatv1.RegisterDeviceRequest{
+		UserId: b16(0x02), DeviceId: dev(),
+		Bundle:         deviceBundle(),
+		OneTimePrekeys: []*chatv1.Prekey{{Id: 1, Key: make([]byte, 32)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if f.regUser != user || f.regDevice != (chat.DeviceID{14: 0x22}) {
+		t.Errorf("fake got user %x device %x", f.regUser, f.regDevice)
+	}
+	if f.regBundle.SignedPrekeyID != 3 || len(f.regBundle.IdentityKey) != 32 || len(f.regBundle.SignedPrekeySignature) != 64 {
+		t.Errorf("fake got bundle %+v", f.regBundle)
+	}
+	if len(f.regPrekeys) != 1 || f.regPrekeys[0].ID != 1 {
+		t.Errorf("fake got prekeys %+v", f.regPrekeys)
+	}
+
+	if _, err := s.DeviceBundle(ctx, &chatv1.DeviceBundleRequest{UserId: b16(0x02), DeviceId: dev()}); err != nil {
+		t.Fatal(err)
+	}
+	if f.bundleUser != user || f.bundleDevice != (chat.DeviceID{14: 0x22}) {
+		t.Errorf("fake got user %x device %x", f.bundleUser, f.bundleDevice)
+	}
+
+	f.bundleOut = chat.PrekeyBundle{IdentityKey: make([]byte, 32), SignedPrekeyID: 9, SignedPrekey: make([]byte, 32)}
+	f.takenOut = chat.ConsumedPrekey{ID: 4, Key: make([]byte, 32), Remaining: 2}
+	res, err := s.DeviceBundle(ctx, &chatv1.DeviceBundleRequest{UserId: b16(0x02), DeviceId: dev()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Bundle.SignedPrekeyId != 9 || res.OneTimePrekey.Id != 4 || res.Remaining != 2 {
+		t.Errorf("bundle response = %+v, want prekey 4, remaining 2", res)
+	}
+
+	f.takenOut = chat.ConsumedPrekey{} // exhausted: no one-time prekey
+	res, err = s.DeviceBundle(ctx, &chatv1.DeviceBundleRequest{UserId: b16(0x02), DeviceId: dev()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OneTimePrekey != nil {
+		t.Errorf("exhausted fetch still carries a prekey: %+v", res)
+	}
+
+	if _, err := s.AddDevicePrekeys(ctx, &chatv1.AddDevicePrekeysRequest{
+		UserId: b16(0x02), DeviceId: dev(),
+		OneTimePrekeys: []*chatv1.Prekey{{Id: 5, Key: make([]byte, 32)}, {Id: 6, Key: make([]byte, 32)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if f.addPrekeysDevice != (chat.DeviceID{14: 0x22}) || len(f.addPrekeys) != 2 || f.addPrekeys[1].ID != 6 {
+		t.Errorf("fake got replenish device %x prekeys %+v", f.addPrekeysDevice, f.addPrekeys)
+	}
+
+	f.listOut = []chat.DeviceInfo{{UserID: user, DeviceID: regDevice}}
+	res2, err := s.ListDevices(ctx, &chatv1.ListDevicesRequest{UserId: b16(0x02)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.listUser != user || len(res2.Devices) != 1 || string(res2.Devices[0].DeviceId) != string(dev()) {
+		t.Errorf("list response = %+v fake got user %x", res2, f.listUser)
+	}
+}
+
+// TestDeviceRPCValidation checks the bundle-free registration path and that
+// a missing bundle is InvalidArgument before reaching the service.
+func TestDeviceRPCValidation(t *testing.T) {
+	f, _ := happyChat()
+	s := grpcapi.New(f)
+	ctx := context.Background()
+
+	if _, err := s.RegisterDevice(ctx, &chatv1.RegisterDeviceRequest{UserId: b16(2), DeviceId: dev()}); code(t, err) != codes.InvalidArgument {
+		t.Errorf("missing bundle: code = %s (%v), want InvalidArgument", code(t, err), err)
+	}
+	if f.regUser != (chat.UserID{}) {
+		t.Errorf("fake was called with a missing bundle")
 	}
 }

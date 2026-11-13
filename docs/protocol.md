@@ -162,3 +162,22 @@ not re-sent.
 Resume itself can burst more frames than the queue holds when a client is
 far behind: a disconnected client resumes again from its new last seen seq
 and makes progress each round.
+
+## Encryption
+
+`header` and `ciphertext` are opaque to the server: klacks stores and relays
+them and never decrypts anything. Interop depends only on the wire format,
+not on which crypto library produced the bytes — libsignal, another library,
+or a hand-rolled implementation all interoperate as long as they speak the
+same format (prekey bundle registration and consumption, X3DH initial
+message, Double Ratchet headers, Sender Key distribution blobs, and AEAD
+associated data binding `room_id || sender_id || device_id || seq`).
+
+The Go reference implementation (X3DH + Double Ratchet on `x/crypto`) is the
+executable definition of that format and the test oracle; `docs/protocol.md`
+and `internal/protocol` carry the transport side. For shipped clients,
+[libsignal](https://github.com/signalapp/libsignal) is the recommended
+library — note its **AGPL-3.0 license**: distributing a client app built on
+it requires releasing that app's source under AGPL-3.0. Projects that cannot
+accept that must use a differently licensed implementation of the same wire
+format; the server treats them identically.

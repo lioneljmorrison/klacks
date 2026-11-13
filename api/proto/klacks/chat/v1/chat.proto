@@ -35,6 +35,15 @@ service ChatService {
   // replay, or the consumer falls behind; the client resubscribes from the
   // last seq it received.
   rpc Subscribe(SubscribeRequest) returns (stream Message);
+
+  // Device registration and prekey bundles (S-22). RegisterDevice upserts
+  // the (user_id, device_id) bundle and its initial one-time prekeys;
+  // DeviceBundle fetches a bundle and consumes one of its one-time prekeys
+  // (S-23), deleted server-side so it is never handed out twice.
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
+  rpc DeviceBundle(DeviceBundleRequest) returns (DeviceBundleResponse);
+  rpc AddDevicePrekeys(AddDevicePrekeysRequest) returns (AddDevicePrekeysResponse);
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
 }
 
 // UUIDs are raw 16 bytes. Kinds ("dm", "group", "space") and roles ("owner",
@@ -98,4 +107,65 @@ message Message {
   bytes ciphertext = 6;
   bytes header = 7;
   google.protobuf.Timestamp created_at = 8;
+}
+
+// PrekeyBundle is a device's uploaded X3DH prekey bundle, public keys only.
+// The server validates shapes only: sizes, ids, counts. It never sees
+// private key material and never verifies signatures.
+message PrekeyBundle {
+  bytes identity_key = 1;            // Ed25519 public key
+  bytes identity_dh_key = 2;         // X25519 (Montgomery) form of the identity
+  int64 signed_prekey_id = 3;        // per device, from 1
+  bytes signed_prekey = 4;           // X25519 public key
+  bytes signed_prekey_signature = 5; // Ed25519 signature
+}
+
+message Prekey {
+  int64 id = 1;  // per device, from 1
+  bytes key = 2; // X25519 public key
+}
+
+message RegisterDeviceRequest {
+  bytes user_id = 1;
+  bytes device_id = 2;
+  PrekeyBundle bundle = 3;
+  repeated Prekey one_time_prekeys = 4;
+}
+
+message RegisterDeviceResponse {}
+
+message DeviceBundleRequest {
+  bytes user_id = 1;
+  bytes device_id = 2;
+}
+
+// The response carries the bundle and the one-time prekey the fetch
+// consumed; one_time_prekey is omitted when the device has none left.
+// remaining is the device's count after the fetch, the fetcher's
+// low-watermark signal to replenish.
+message DeviceBundleResponse {
+  PrekeyBundle bundle = 1;
+  Prekey one_time_prekey = 2;
+  int32 remaining = 3;
+}
+
+message AddDevicePrekeysRequest {
+  bytes user_id = 1;
+  bytes device_id = 2;
+  repeated Prekey one_time_prekeys = 3;
+}
+
+message AddDevicePrekeysResponse {}
+
+message Device {
+  bytes device_id = 1;
+  google.protobuf.Timestamp last_seen_at = 2; // omitted when never seen
+}
+
+message ListDevicesRequest {
+  bytes user_id = 1;
+}
+
+message ListDevicesResponse {
+  repeated Device devices = 1;
 }
