@@ -184,6 +184,18 @@ func TestPostMessageOrphanOverwritten(t *testing.T) {
 	if got := e.stored(t, room); len(got) != 0 {
 		t.Fatalf("orphan served: %+v", got)
 	}
+	// The orphan exists in ScyllaDB above the watermark: reading past hi
+	// finds it.
+	var orphans []store.Message
+	for m, err := range e.msgs.Range(ctx, room, 0, 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		orphans = append(orphans, m)
+	}
+	if len(orphans) != 1 || orphans[0].MessageID != payload(1).MessageID {
+		t.Fatalf("rows above the watermark = %+v, want the orphan of message 1", orphans)
+	}
 
 	seq, err := e.svc.PostMessage(ctx, room, owner, payload(2))
 	if err != nil {
