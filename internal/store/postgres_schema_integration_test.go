@@ -4,43 +4,13 @@ package store_test
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/lioneljmorrison/klacks/internal/store"
-	"github.com/lioneljmorrison/klacks/internal/store/migrate"
 	"github.com/lioneljmorrison/klacks/internal/testutil/dbtest"
-	"github.com/lioneljmorrison/klacks/migrations"
 )
-
-var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
-
-// migratedPostgres returns a pool on a fresh database with the embedded
-// migrations applied.
-func migratedPostgres(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	ctx := context.Background()
-	dsn := dbtest.Postgres(t)
-	m, err := migrate.NewPostgres(ctx, dsn, migrations.Postgres(), discard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = m.Close() }()
-	if err := m.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-	pool, err := store.OpenPostgres(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
-}
 
 const (
 	room1 = "00000000-0000-0000-0000-0000000000a1"
@@ -49,7 +19,7 @@ const (
 )
 
 func TestPostgresSchemaRooms(t *testing.T) {
-	pool := migratedPostgres(t)
+	pool := dbtest.MigratedPostgres(t)
 	ctx := context.Background()
 
 	exec := func(sql string, args ...any) error {
@@ -98,7 +68,7 @@ func TestPostgresSchemaRooms(t *testing.T) {
 }
 
 func TestPostgresSchemaDevices(t *testing.T) {
-	pool := migratedPostgres(t)
+	pool := dbtest.MigratedPostgres(t)
 	ctx := context.Background()
 	_, err := pool.Exec(ctx, `INSERT INTO devices (user_id, device_id, identity_key, signed_prekey)
 		VALUES ($1, $2, $3, $4)`, user1, dev1, []byte{1, 2}, []byte{3, 4})
@@ -121,7 +91,7 @@ func TestPostgresSchemaDevices(t *testing.T) {
 // sessions.
 func TestMessageWriteTS(t *testing.T) {
 	before := time.Now().UnixMicro()
-	pool := migratedPostgres(t)
+	pool := dbtest.MigratedPostgres(t)
 	ctx := context.Background()
 
 	var cache int64

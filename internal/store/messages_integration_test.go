@@ -8,35 +8,9 @@ import (
 	"testing"
 	"time"
 
-	gocql "github.com/apache/cassandra-gocql-driver/v2"
-
 	"github.com/lioneljmorrison/klacks/internal/store"
-	"github.com/lioneljmorrison/klacks/internal/store/migrate"
 	"github.com/lioneljmorrison/klacks/internal/testutil/dbtest"
-	"github.com/lioneljmorrison/klacks/migrations"
 )
-
-// migratedScylla returns a session on a fresh keyspace with the embedded
-// migrations applied.
-func migratedScylla(t *testing.T) *gocql.Session {
-	t.Helper()
-	ctx := context.Background()
-	cfg := dbtest.Scylla(t)
-	m, err := migrate.NewScylla(ctx, cfg, migrations.Scylla(), discard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = m.Close() }()
-	if err := m.Up(ctx); err != nil {
-		t.Fatal(err)
-	}
-	s, err := store.OpenScylla(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(s.Close)
-	return s
-}
 
 func id(b byte) store.UUID { return store.UUID{15: b} }
 
@@ -66,7 +40,7 @@ func collect(t *testing.T, ms store.MessageStore, room store.UUID, after, hi int
 }
 
 func TestMessagesRangeAcrossBuckets(t *testing.T) {
-	ms := store.NewScyllaMessages(migratedScylla(t))
+	ms := store.NewScyllaMessages(dbtest.MigratedScylla(t))
 	ctx := context.Background()
 	room, other := id(0xa1), id(0xa2)
 	n := store.BucketSize
@@ -113,7 +87,7 @@ func TestMessagesRangeAcrossBuckets(t *testing.T) {
 // the same seq, the write with the higher explicit timestamp wins whatever
 // order the writes arrive in.
 func TestMessagesOverwriteByTimestamp(t *testing.T) {
-	ms := store.NewScyllaMessages(migratedScylla(t))
+	ms := store.NewScyllaMessages(dbtest.MigratedScylla(t))
 	ctx := context.Background()
 	room := id(0xa1)
 	write := func(payload string, ts int64) {
@@ -145,7 +119,7 @@ func TestMessagesOverwriteByTimestamp(t *testing.T) {
 }
 
 func TestMessagesRejectsBadArguments(t *testing.T) {
-	ms := store.NewScyllaMessages(migratedScylla(t))
+	ms := store.NewScyllaMessages(dbtest.MigratedScylla(t))
 	ctx := context.Background()
 	if err := ms.Insert(ctx, msg(id(1), 0), 1); err == nil {
 		t.Error("seq 0 accepted")
