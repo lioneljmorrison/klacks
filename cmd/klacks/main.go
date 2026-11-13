@@ -65,7 +65,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 			return 1
 		}
 		return 0
-	case "migrate":
+	case "serve", "migrate":
 		cfg, ok := load()
 		if !ok {
 			return 1
@@ -77,7 +77,18 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		return cmdMigrate(ctx, cfg, log, args[1:], stdout, stderr)
+		if args[0] == "migrate" {
+			return cmdMigrate(ctx, cfg, log, args[1:], stdout, stderr)
+		}
+		if len(args) > 1 {
+			fmt.Fprintf(stderr, "klacks serve: unexpected arguments %q\n", args[1:])
+			return 2
+		}
+		if err := cmdServe(ctx, cfg, log); err != nil {
+			log.Error("serve failed", "err", err)
+			return 1
+		}
+		return 0
 	case "help":
 		usage(stdout)
 		return 0
@@ -92,6 +103,7 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `Usage: klacks [-config file.json] <command>
 
 Commands:
+  serve      Run the server (HTTP: /healthz, /readyz)
   migrate    Apply schema migrations to PostgreSQL and ScyllaDB
              (klacks migrate -h for actions)
   config     Validate and print the effective configuration (secrets redacted)
