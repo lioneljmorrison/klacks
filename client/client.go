@@ -43,6 +43,14 @@ type Client struct {
 	// the prekey message establishes the session.
 	pending map[sessionKey][]deliver
 
+	// Sender keys (S-27, S-28): this device's sending chain per room, the
+	// installed chains of each peer sender device per room, and the group
+	// messages stashed per sender device while their distribution is in
+	// flight.
+	skOwn     map[[16]byte]*SenderChain
+	skPeers   map[skRef]*SenderKeys
+	skPending map[skRef][]deliver
+
 	// The WebSocket connection and its read loop.
 	conn       *websocket.Conn
 	readCtx    context.Context
@@ -128,6 +136,9 @@ func newClientWithKeys(base string, user, device [16]byte, id IdentityKey, spk S
 		sessions:   make(map[sessionKey]*session),
 		rooms:      make(map[[16]byte]*roomState),
 		pending:    make(map[sessionKey][]deliver),
+		skOwn:      make(map[[16]byte]*SenderChain),
+		skPeers:    make(map[skRef]*SenderKeys),
+		skPending:  make(map[skRef][]deliver),
 		httpc:      &http.Client{},
 		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Inbox:      make(chan Received, 1024),

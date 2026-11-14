@@ -210,6 +210,13 @@ func (c *Client) handleDeliver(f protocol.Deliver) {
 		})
 		return
 	}
+	// A sender-key group message (header type 0x03) is not a pairwise
+	// message: it decrypts under the sender device's installed chain
+	// (S-28). Everything else rides the pairwise ratchet.
+	if isSenderKeyMessage(d.Header) {
+		c.groupDeliver(d, redelivery)
+		return
+	}
 	c.decryptDeliver(d, redelivery)
 }
 
@@ -238,14 +245,22 @@ func (c *Client) decryptDeliver(d deliver, redelivery bool) {
 		c.inbox(r)
 		c.ack(d.Room, d.Seq)
 		return
-	case redelivery:
+	}
+	// A distribution payload is a control message: install the sender
+	// device's chain and emit nothing (a conflict, which no honest sender
+	// produces, is reported). An application plaintext is emitted unless
+	// it is a verified redelivery.
+	if k, derr := unmarshalSenderKeyDistribution(pt); derr == nil {
+		c.ack(d.Room, d.Seq)
+		c.installDistribution(d, k)
+	} else if redelivery {
 		// Already delivered once and it re-verifies: stay silent.
-		return
-	default:
+		c.ack(d.Room, d.Seq)
+	} else {
 		r.Plaintext = pt
 		c.inbox(r)
+		c.ack(d.Room, d.Seq)
 	}
-	c.ack(d.Room, d.Seq)
 	// The session now exists; anything that arrived before the session's
 	// first message can finally be decrypted, in arrival order (the
 	// ratchet's skipped-key handling puts the chain back together).
