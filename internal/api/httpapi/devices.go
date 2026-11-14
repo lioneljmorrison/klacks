@@ -2,8 +2,8 @@ package httpapi
 
 // Prekey bundle endpoints (S-22) over the device store. The server validates
 // shapes only — sizes, ids, counts; it never sees private key material and
-// never verifies signatures. Identity comes from the authenticator, the dev
-// stub until real auth (S-31): a client registers only its own (user, device),
+// never verifies signatures. Identity comes from the authenticator (JWT, or
+// the dev stub in env dev): a client registers only its own (user, device),
 // but may fetch any user's bundle, which is what session initiation needs.
 
 import (

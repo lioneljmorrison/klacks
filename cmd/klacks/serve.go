@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/lioneljmorrison/klacks/internal/api/devui"
@@ -46,8 +47,12 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		devices   *httpapi.Devices
 		devRooms  *httpapi.DevRooms
 	)
-	dev := clientAuthenticator(cfg.Env) != nil
-	if a := clientAuthenticator(cfg.Env); a != nil {
+	a, err := clientAuthenticator(cfg)
+	if err != nil {
+		return err
+	}
+	dev := devTools(a)
+	if a != nil {
 		rooms := store.NewRooms(pg, roomLockTimeout)
 		messages := store.NewScyllaMessages(scylla)
 		devices = httpapi.NewDevices(a, store.NewDevices(pg), log)
@@ -61,10 +66,12 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		// so the browser test client can create and populate rooms.
 		if dev {
 			devRooms = httpapi.NewDevRooms(a, roomAdmin{svc: svc}, log)
+			log.Warn("client auth is the dev stub: any claimed identity is trusted")
+		} else {
+			log.Info("client auth is JWT", "issuer", cfg.Auth.JWT.Issuer, "audience", cfg.Auth.JWT.Audience)
 		}
-		log.Warn("client auth is the dev stub: any claimed identity is trusted")
 	} else {
-		log.Warn("no client authenticator for this env; /ws and the prekey bundle API are not served", "env", cfg.Env)
+		log.Warn("no client authenticator for this env (set auth.jwt); /ws and the prekey bundle API are not served", "env", cfg.Env)
 	}
 
 	handler := http.Handler(nil)
@@ -141,11 +148,31 @@ func (a roomAdmin) Members(ctx context.Context, room store.UUID) ([]store.UUID, 
 }
 
 // clientAuthenticator returns the authenticator for client connections, or
-// nil if there is none. The dev stub trusts any claimed identity, so it is
-// only used when env is dev; other envs get none until real auth (S-31).
-func clientAuthenticator(env string) auth.Authenticator {
-	if env == config.EnvDev {
-		return auth.Dev{}
+// nil if there is none. A configured JWT key wins in every env; without one,
+// env dev gets the dev stub, which trusts any claimed identity, and any other
+// env gets nothing.
+func clientAuthenticator(cfg config.Config) (auth.Authenticator, error) {
+	if cfg.Auth.JWT.Enabled() {
+		b, err := os.ReadFile(cfg.Auth.JWT.PublicKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("auth.jwt.public_key_file: %w", err)
+		}
+		key, err := auth.ParseEd25519PublicKeyPEM(b)
+		if err != nil {
+			return nil, fmt.Errorf("auth.jwt.public_key_file %s: %w", cfg.Auth.JWT.PublicKeyFile, err)
+		}
+		return auth.NewJWT(key, cfg.Auth.JWT.Issuer, cfg.Auth.JWT.Audience)
 	}
-	return nil
+	if cfg.Env == config.EnvDev {
+		return auth.Dev{}, nil
+	}
+	return nil, nil
+}
+
+// devTools reports whether the dev UI and dev room endpoints are mounted:
+// only alongside the dev stub, since they exist to test with claimed
+// identities and must never sit next to real auth.
+func devTools(a auth.Authenticator) bool {
+	_, ok := a.(auth.Dev)
+	return ok
 }
