@@ -83,6 +83,7 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		// hands the message to the hub (S-13).
 		svc := core.New(rooms, messages, mgr.Deliver, mgr.MemberRemoved)
 		mgr.Chat = svc
+		mgr.PublishTimeout = publishTimeout(cfg)
 		wsHandler = mgr
 		// The dev room endpoints shim core's room management over REST,
 		// so the browser test client can create and populate rooms.
@@ -142,6 +143,12 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	}
 	log.Info("klacks stopped")
 	return nil
+}
+
+// publishTimeout bounds a WebSocket publish end to end (S-47): it may wait
+// for the room lock and then hold it across its ScyllaDB write.
+func publishTimeout(cfg config.Config) time.Duration {
+	return roomLockTimeout + cfg.Scylla.Timeout.D()
 }
 
 // roomLockTimeout bounds every publish's and membership change's room lock

@@ -66,6 +66,12 @@ type Manager struct {
 	ReplayWindow  time.Duration
 	ReplayEntries int
 
+	// PublishTimeout bounds each publish, from the frame to its reply (S-47):
+	// a partitioned store never answers, and the server-side lock and
+	// statement timeouts cannot fire without it. Size it to the room lock
+	// timeout plus the ScyllaDB write timeout. 0 means no deadline.
+	PublishTimeout time.Duration
+
 	// Chat serves the client frames. It must be set before serving; while it
 	// is nil, every valid frame is answered with a "not implemented yet"
 	// error (unit tests, and the endpoint before S-13).
