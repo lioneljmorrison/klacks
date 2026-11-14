@@ -298,3 +298,66 @@ func TestResumePointFromRestoredState(t *testing.T) {
 		t.Fatalf("resumePoint of an unknown room = %d; want 0", got)
 	}
 }
+
+// S-49: room seen sets go to an append-only log next to the state file,
+// not into it: a save writes only what is new. A state saved before S-49
+// (seen sets inside) migrates on the first save, and a restart restores
+// the seen sets from the log.
+func TestSeenLog(t *testing.T) {
+	a, _ := testApp(t)
+	a.device = [16]byte{2}
+	var err error
+	if a.c, err = clientFromKeys("http://test.invalid", a.user, a.device, a.keys); err != nil {
+		t.Fatal(err)
+	}
+	room := [16]byte{9}
+	legacy := `{"v":2,"sessions":[],"fallbacks":[],"rooms":[{"room":[9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"started":true,"last_seq":2,` +
+		`"seen":[{"seq":1,"id":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]},{"seq":2,"id":[2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}]}]}`
+	if err := a.c.RestoreState([]byte(legacy)); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // the second save logs nothing new
+		if err := a.saveState(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := os.ReadFile(sessionsPath(a.keyPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(state), `"seen":[{`) {
+		t.Errorf("state file still carries seen entries: %s", state)
+	}
+	logb, err := os.ReadFile(seenLogPath(a.keyPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(logb), "\n"); n != 2 {
+		t.Errorf("seen log has %d lines; want 2:\n%s", n, logb)
+	}
+	// A torn last line (a crash mid-append) is ignored.
+	f, err := os.OpenFile(seenLogPath(a.keyPath), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"room":[9,0`)
+	_ = f.Close()
+
+	c2, err := clientFromKeys("http://test.invalid", a.user, a.device, a.keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreSessions(c2, a.keyPath); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if seq, ok := c2.LastSeq(room); !ok || seq != 2 {
+		t.Errorf("LastSeq = %d, %v; want 2", seq, ok)
+	}
+	full, err := c2.MarshalState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(full), `"seq":1`) || !strings.Contains(string(full), `"seq":2`) {
+		t.Errorf("restored state lacks the logged seen entries: %s", full)
+	}
+}
