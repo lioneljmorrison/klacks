@@ -125,10 +125,6 @@ func Open(ctx context.Context, cfg Config) (*Service, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	log := cfg.Log
-	if log == nil {
-		log = slog.New(slog.NewTextHandler(io.Discard, nil))
-	}
 
 	pc, err := pgxpool.ParseConfig(cfg.PostgresDSN)
 	if err != nil {
@@ -160,21 +156,71 @@ func Open(ctx context.Context, cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("chat: scylla: %w (have the stores been migrated up?)", err)
 	}
 
+	s, _ := newService(cfg, pool, store.NewRooms(pool, cfg.RoomLockTimeout), store.NewScyllaMessages(sc), nil, nil)
+	s.pool, s.scylla = pool, sc
+	return s, nil
+}
+
+// NewShared builds a Service over stores the caller already holds, and
+// returns it with the core it built. It exists for cmd/klacks, which serves
+// one core over both WebSocket and gRPC (S-45): onPosted and onRemoved,
+// when set, also receive the core's post-commit fan-out and membership
+// removals, so each transport sees the other's messages live and a removal
+// through either reaches both hubs. rooms and messages are the caller's,
+// so it can instrument them (S-37 metrics) once for both transports; pool
+// serves the device registry. Its parameters are internal types; it is not
+// part of the embedding API. Of cfg, only Actor, SendQueue,
+// OnMemberRemoved and Log are used. Close leaves the stores open: the
+// caller owns them.
+func NewShared(cfg Config, pool *pgxpool.Pool, rooms *store.Rooms, messages store.MessageStore,
+	onPosted func(context.Context, store.Message), onRemoved func(context.Context, core.MemberRemoved),
+) (*Service, *core.Service, error) {
+	if cfg.Actor == (UserID{}) {
+		return nil, nil, fmt.Errorf("chat: %w: actor is required", ErrInvalidArgument)
+	}
+	if cfg.SendQueue < 0 {
+		return nil, nil, fmt.Errorf("chat: %w: send queue must not be negative", ErrInvalidArgument)
+	}
+	s, c := newService(cfg, pool, rooms, messages, onPosted, onRemoved)
+	return s, c, nil
+}
+
+// newService wires a Service and its core over the stores. The core's
+// fan-out goes to the Service's hub, then to onPosted; its removals to
+// cfg.OnMemberRemoved, then to onRemoved.
+func newService(cfg Config, pool *pgxpool.Pool, rooms *store.Rooms, messages store.MessageStore,
+	onPosted func(context.Context, store.Message), onRemoved func(context.Context, core.MemberRemoved),
+) (*Service, *core.Service) {
+	log := cfg.Log
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	s := &Service{
 		cfg:     cfg,
 		log:     log,
-		pool:    pool,
 		devices: store.NewDevices(pool),
 		hub:     make(map[[16]byte]map[*subscription]struct{}),
 	}
-	var onRemoved func(context.Context, core.MemberRemoved)
-	if cfg.OnMemberRemoved != nil {
-		onRemoved = func(ctx context.Context, ev core.MemberRemoved) {
-			cfg.OnMemberRemoved(ctx, MemberRemoved{Room: RoomID(ev.Room), User: UserID(ev.User), Actor: UserID(ev.Actor)})
+	posted := s.Deliver
+	if onPosted != nil {
+		posted = func(ctx context.Context, msg store.Message) {
+			s.Deliver(ctx, msg)
+			onPosted(ctx, msg)
 		}
 	}
-	s.core = core.New(store.NewRooms(pool, cfg.RoomLockTimeout), store.NewScyllaMessages(sc), s.Deliver, onRemoved)
-	return s, nil
+	var removed func(context.Context, core.MemberRemoved)
+	if cfg.OnMemberRemoved != nil || onRemoved != nil {
+		removed = func(ctx context.Context, ev core.MemberRemoved) {
+			if cfg.OnMemberRemoved != nil {
+				cfg.OnMemberRemoved(ctx, MemberRemoved{Room: RoomID(ev.Room), User: UserID(ev.User), Actor: UserID(ev.Actor)})
+			}
+			if onRemoved != nil {
+				onRemoved(ctx, ev)
+			}
+		}
+	}
+	s.core = core.New(rooms, messages, posted, removed)
+	return s, s.core
 }
 
 // validate reports every problem with the configuration at once. It runs

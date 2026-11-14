@@ -2,24 +2,35 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
 
+	gocql "github.com/apache/cassandra-gocql-driver/v2"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+
+	chatv1 "github.com/lioneljmorrison/klacks/api/gen/klacks/chat/v1"
 	"github.com/lioneljmorrison/klacks/internal/api/devui"
+	"github.com/lioneljmorrison/klacks/internal/api/grpcapi"
 	"github.com/lioneljmorrison/klacks/internal/api/httpapi"
 	"github.com/lioneljmorrison/klacks/internal/api/ws"
 	"github.com/lioneljmorrison/klacks/internal/auth"
 	"github.com/lioneljmorrison/klacks/internal/config"
 	"github.com/lioneljmorrison/klacks/internal/core"
 	"github.com/lioneljmorrison/klacks/internal/store"
+	"github.com/lioneljmorrison/klacks/pkg/chat"
 )
 
-// cmdServe connects to both stores and serves HTTP until ctx is cancelled
-// (SIGINT/SIGTERM). It fails fast if a store is unreachable at startup;
-// after that, /readyz reports store outages.
+// cmdServe connects to both stores and serves HTTP, and gRPC when
+// configured, until ctx is cancelled (SIGINT/SIGTERM). It fails fast if a
+// store is unreachable at startup; after that, /readyz reports store
+// outages.
 func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	log.Info("starting klacks", "version", version, "env", cfg.Env)
 
@@ -36,32 +47,110 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	}
 	defer scylla.Close()
 
+	s, err := newServers(cfg, pg, scylla, log)
+	if err != nil {
+		return err
+	}
+	var lc net.ListenConfig
+	httpLn, err := lc.Listen(ctx, "tcp", cfg.HTTP.Addr)
+	if err != nil {
+		return fmt.Errorf("http: %w", err)
+	}
+	var grpcLn net.Listener
+	if s.grpc != nil {
+		if grpcLn, err = lc.Listen(ctx, "tcp", cfg.GRPC.Addr); err != nil {
+			_ = httpLn.Close()
+			return fmt.Errorf("grpc: %w", err)
+		}
+	}
+	if err := s.serve(ctx, httpLn, grpcLn); err != nil {
+		return err
+	}
+	log.Info("klacks stopped")
+	return nil
+}
+
+// servers is everything klacks serve runs over one pair of stores: the
+// HTTP server (health, /ws, prekey API, dev tooling) and, when configured,
+// the gRPC API. Both transports share one core (S-45).
+type servers struct {
+	log  *slog.Logger
+	http *httpapi.Server
+	mgr  *ws.Manager // nil without a client authenticator
+
+	grpc     *grpc.Server  // nil without grpc.addr
+	grpcTLS  bool          // for the listening log line
+	chat     *chat.Service // the gRPC adapter's service; nil without gRPC
+	stopWait time.Duration // how long gRPC may take to stop gracefully
+}
+
+// newServers builds the servers over pg and scylla.
+func newServers(cfg config.Config, pg *pgxpool.Pool, scylla *gocql.Session, log *slog.Logger) (*servers, error) {
 	health := httpapi.NewHealth([]httpapi.Check{
 		store.PostgresCheck{Pool: pg},
 		store.ScyllaCheck{Session: scylla},
 	}, cfg.HTTP.ReadyTimeout.D(), log)
 
+	s := &servers{log: log, stopWait: cfg.HTTP.ShutdownTimeout.D()}
 	var (
-		mgr       *ws.Manager
 		wsHandler http.Handler
 		devices   *httpapi.Devices
 		devRooms  *httpapi.DevRooms
 	)
 	a, err := clientAuthenticator(cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	dev := devTools(a)
 	if a != nil {
-		rooms := store.NewRooms(pg, roomLockTimeout)
-		messages := store.NewScyllaMessages(scylla)
+		s.mgr = ws.NewManager(a, log)
+	}
+
+	// The room and message stores are built once, for whichever core
+	// serves: anything that instruments them sees both transports.
+	rooms := store.NewRooms(pg, roomLockTimeout)
+	var messages store.MessageStore = store.NewScyllaMessages(scylla)
+
+	// One core serves both transports. Its post-commit fan-out and its
+	// removals reach the WebSocket hub and, with gRPC, the chat service's
+	// subscription hub, so each transport sees the other's messages live
+	// and a removal through gRPC still reaches the removed member's
+	// sockets (S-29).
+	var svc *core.Service
+	if cfg.GRPC.Enabled() {
+		actor, err := store.ParseUUID(cfg.GRPC.Actor)
+		if err != nil {
+			return nil, fmt.Errorf("grpc.actor: %w", err)
+		}
+		var (
+			posted  func(context.Context, store.Message)
+			removed func(context.Context, core.MemberRemoved)
+		)
+		if s.mgr != nil {
+			posted, removed = s.mgr.Deliver, s.mgr.MemberRemoved
+		}
+		s.chat, svc, err = chat.NewShared(chat.Config{
+			Actor: chat.UserID(actor),
+			Log:   log,
+		}, pg, rooms, messages, posted, removed)
+		if err != nil {
+			return nil, err
+		}
+		if s.grpc, err = newGRPCServer(cfg.GRPC, s.chat); err != nil {
+			return nil, err
+		}
+		s.grpcTLS = cfg.GRPC.TLS()
+		if !s.grpcTLS {
+			log.Warn("grpc is plaintext (no grpc.tls_cert_file): service tokens cross the network in the clear unless a TLS proxy fronts it")
+		}
+	} else if s.mgr != nil {
+		svc = core.New(rooms, messages, s.mgr.Deliver, s.mgr.MemberRemoved)
+	}
+
+	if s.mgr != nil {
 		devices = httpapi.NewDevices(a, store.NewDevices(pg), log)
-		mgr = ws.NewManager(a, log)
-		// Fan-out goes through the manager: after each commit the core
-		// hands the message to the hub (S-13).
-		svc := core.New(rooms, messages, mgr.Deliver, mgr.MemberRemoved)
-		mgr.Chat = svc
-		wsHandler = mgr
+		s.mgr.Chat = svc
+		wsHandler = s.mgr
 		// The dev room endpoints shim core's room management over REST,
 		// so the browser test client can create and populate rooms.
 		if dev {
@@ -80,12 +169,12 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	if dev {
 		ui, err := devui.New()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		handler = ui
 	}
 
-	srv := httpapi.NewServer(cfg.HTTP, health, wsHandler, devices, log)
+	s.http = httpapi.NewServer(cfg.HTTP, health, wsHandler, devices, log)
 	// The browser client must share the server's origin (/ws rejects
 	// cross-origin upgrades), so the dev tooling is mounted on the mux the
 	// server serves rather than a separate listener. A wrapper mux routes
@@ -101,20 +190,83 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		if devRooms != nil {
 			devRooms.Register(outer)
 		}
-		outer.Handle("/", srv.Handler())
-		srv.UseHandler(outer)
+		outer.Handle("/", s.http.Handler())
+		s.http.UseHandler(outer)
 	}
-	err = srv.ListenAndServe(ctx)
-	if mgr != nil {
-		// Shutdown does not track WebSockets: close them now that HTTP has
-		// stopped, and wait for them.
-		mgr.Close()
-	}
+	return s, nil
+}
+
+// newGRPCServer builds the gRPC server for ChatService behind the service
+// tokens, over TLS when configured.
+func newGRPCServer(cfg config.GRPC, svc *chat.Service) (*grpc.Server, error) {
+	tokens, err := grpcapi.NewServiceTokens(cfg.ServiceTokens...)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	log.Info("klacks stopped")
-	return nil
+	opts := tokens.ServerOptions()
+	if cfg.TLS() {
+		creds, err := credentials.NewServerTLSFromFile(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("grpc tls: %w", err)
+		}
+		opts = append(opts, grpc.Creds(creds))
+	}
+	gs := grpc.NewServer(opts...)
+	chatv1.RegisterChatServiceServer(gs, grpcapi.New(svc))
+	return gs, nil
+}
+
+// serve serves HTTP on httpLn and, with gRPC, gRPC on grpcLn, until ctx is
+// cancelled or either server fails; then it stops both. HTTP drains and
+// shuts down first, then the WebSockets close. The chat service closes
+// next, ending every Subscribe stream (they never end on their own, so a
+// graceful stop would otherwise wait out the timeout), and gRPC stops
+// gracefully, forcibly after the shutdown timeout.
+func (s *servers) serve(ctx context.Context, httpLn, grpcLn net.Listener) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		grpcErr  error
+		grpcDone = make(chan struct{})
+	)
+	if s.grpc != nil {
+		go func() {
+			defer close(grpcDone)
+			grpcErr = s.grpc.Serve(grpcLn)
+			cancel() // a failed gRPC server takes HTTP down with it
+		}()
+		s.log.Info("grpc server listening", "addr", grpcLn.Addr().String(), "tls", s.grpcTLS)
+	} else {
+		close(grpcDone)
+	}
+
+	httpErr := s.http.Serve(ctx, httpLn)
+	if s.mgr != nil {
+		// Shutdown does not track WebSockets: close them now that HTTP
+		// has stopped, and wait for them.
+		s.mgr.Close()
+	}
+	if s.grpc != nil {
+		s.chat.Close()
+		stopped := make(chan struct{})
+		go func() {
+			s.grpc.GracefulStop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-time.After(s.stopWait):
+			s.log.Warn("grpc graceful stop timed out; stopping")
+			s.grpc.Stop()
+			<-stopped
+		}
+		s.log.Info("grpc server stopped")
+	}
+	<-grpcDone
+	if grpcErr != nil {
+		grpcErr = fmt.Errorf("grpc: %w", grpcErr)
+	}
+	return errors.Join(httpErr, grpcErr)
 }
 
 // roomLockTimeout bounds every publish's and membership change's room lock

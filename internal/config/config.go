@@ -32,7 +32,31 @@ type Config struct {
 	Postgres Postgres `json:"postgres"`
 	Scylla   Scylla   `json:"scylla"`
 	Auth     Auth     `json:"auth"`
+	GRPC     GRPC     `json:"grpc"`
 }
+
+// GRPC configures the gRPC API listener (S-45): klacks.chat.v1.ChatService
+// for embedders in another process, over the same core as /ws. With no
+// addr, gRPC is not served.
+type GRPC struct {
+	Addr string `json:"addr"` // host:port; empty disables gRPC
+	// ServiceTokens are the bearer secrets calling services present; any
+	// one is accepted, so a token can be rotated without downtime.
+	ServiceTokens []string `json:"service_tokens"`
+	// Actor is the UUID every service call acts as: rooms' owner, the
+	// acting user of membership changes, the reader of Subscribe.
+	Actor string `json:"actor"`
+	// TLSCertFile and TLSKeyFile (PEM) serve gRPC over TLS; both or
+	// neither. Without them gRPC is plaintext, for a TLS-terminating proxy.
+	TLSCertFile string `json:"tls_cert_file"`
+	TLSKeyFile  string `json:"tls_key_file"`
+}
+
+// Enabled reports whether gRPC is served.
+func (g GRPC) Enabled() bool { return g.Addr != "" }
+
+// TLS reports whether gRPC is served over TLS.
+func (g GRPC) TLS() bool { return g.TLSCertFile != "" }
 
 // Auth configures client authentication.
 type Auth struct {
@@ -202,6 +226,13 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	str("KLACKS_AUTH_JWT_PUBLIC_KEY_FILE", &cfg.Auth.JWT.PublicKeyFile)
 	str("KLACKS_AUTH_JWT_ISSUER", &cfg.Auth.JWT.Issuer)
 	str("KLACKS_AUTH_JWT_AUDIENCE", &cfg.Auth.JWT.Audience)
+	str("KLACKS_GRPC_ADDR", &cfg.GRPC.Addr)
+	if v := getenv("KLACKS_GRPC_SERVICE_TOKENS"); v != "" {
+		cfg.GRPC.ServiceTokens = splitList(v)
+	}
+	str("KLACKS_GRPC_ACTOR", &cfg.GRPC.Actor)
+	str("KLACKS_GRPC_TLS_CERT_FILE", &cfg.GRPC.TLSCertFile)
+	str("KLACKS_GRPC_TLS_KEY_FILE", &cfg.GRPC.TLSKeyFile)
 	if len(errs) > 0 {
 		return fmt.Errorf("config: %w", errors.Join(errs...))
 	}
@@ -221,6 +252,9 @@ func splitList(s string) []string {
 // keyspaceRE matches names CQL accepts unquoted. Keyspace names are spliced
 // into CQL statements, so nothing else is allowed.
 var keyspaceRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,47}$`)
+
+// uuidRE matches a canonical UUID.
+var uuidRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // Validate reports every problem with the configuration at once.
 func (c Config) Validate() error {
@@ -277,6 +311,25 @@ func (c Config) Validate() error {
 			bad("auth.jwt.audience is required with auth.jwt.public_key_file (KLACKS_AUTH_JWT_AUDIENCE)")
 		}
 	}
+	if g := c.GRPC; g.Enabled() {
+		if _, _, err := net.SplitHostPort(g.Addr); err != nil {
+			bad("grpc.addr %q: %v", g.Addr, err)
+		}
+		if len(g.ServiceTokens) == 0 {
+			bad("grpc.service_tokens is required with grpc.addr (KLACKS_GRPC_SERVICE_TOKENS)")
+		}
+		for _, tok := range g.ServiceTokens {
+			if tok == "" {
+				bad("grpc.service_tokens must not contain an empty token")
+			}
+		}
+		if !uuidRE.MatchString(g.Actor) || strings.Trim(g.Actor, "0-") == "" {
+			bad("grpc.actor must be a non-zero UUID (KLACKS_GRPC_ACTOR), got %q", g.Actor)
+		}
+		if (g.TLSCertFile == "") != (g.TLSKeyFile == "") {
+			bad("grpc.tls_cert_file and grpc.tls_key_file go together")
+		}
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("config: %w", errors.Join(errs...))
 	}
@@ -290,6 +343,12 @@ func (c Config) Redacted() Config {
 		c.Scylla.Password = "xxxxx"
 	}
 	c.Scylla.Hosts = append([]string(nil), c.Scylla.Hosts...)
+	if n := len(c.GRPC.ServiceTokens); n > 0 {
+		c.GRPC.ServiceTokens = make([]string, n)
+		for i := range c.GRPC.ServiceTokens {
+			c.GRPC.ServiceTokens[i] = "xxxxx"
+		}
+	}
 	return c
 }
 
