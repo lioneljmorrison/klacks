@@ -275,3 +275,30 @@ func TestReplenishSavesBeforeUpload(t *testing.T) {
 		t.Fatalf("uploaded %d time(s) although saving the keys failed: %s", uploads, out)
 	}
 }
+
+// S-44: with -token, testchat's own REST calls carry the bearer token and
+// no dev identity headers; without it, the dev headers.
+func TestRESTAuth(t *testing.T) {
+	var authz, devUser string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authz, devUser = r.Header.Get("Authorization"), r.Header.Get("X-Klacks-User")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	a, _ := testApp(t)
+	a.base, a.httpc = srv.URL, srv.Client()
+
+	if err := a.rest(t.Context(), http.MethodGet, "/x", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if authz != "" || devUser == "" {
+		t.Errorf("no token: Authorization %q, X-Klacks-User %q; want dev headers only", authz, devUser)
+	}
+	a.token = "tok"
+	if err := a.rest(t.Context(), http.MethodGet, "/x", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if authz != "Bearer tok" || devUser != "" {
+		t.Errorf("token: Authorization %q, X-Klacks-User %q; want bearer only", authz, devUser)
+	}
+}

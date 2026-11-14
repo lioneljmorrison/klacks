@@ -52,6 +52,12 @@ type testServer struct {
 
 func newE2EStack(t *testing.T) *e2eStack {
 	t.Helper()
+	return newE2EStackWith(t, auth.Dev{})
+}
+
+// newE2EStackWith is newE2EStack with the given client authenticator.
+func newE2EStackWith(t *testing.T, a auth.Authenticator) *e2eStack {
+	t.Helper()
 	pool := dbtest.MigratedPostgres(t)
 	scylla := dbtest.MigratedScylla(t)
 
@@ -59,7 +65,7 @@ func newE2EStack(t *testing.T) *e2eStack {
 	msgs := store.NewScyllaMessages(scylla)
 	log := slog.New(slog.NewTextHandler(discardWriter{}, nil))
 
-	m := ws.NewManager(auth.Dev{}, log)
+	m := ws.NewManager(a, log)
 	m.PingInterval, m.PingTimeout = time.Minute, time.Minute
 	m.SendQueue = 4096
 	// The replay buffer holds pre-tamper copies of messages in memory; the
@@ -72,7 +78,7 @@ func newE2EStack(t *testing.T) *e2eStack {
 
 	devices := store.NewDevices(pool)
 	srv := httpapi.NewServer(config.HTTP{}, httpapi.NewHealth(nil, time.Second, log),
-		m, httpapi.NewDevices(auth.Dev{}, devices, log), log)
+		m, httpapi.NewDevices(a, devices, log), log)
 	ts := newTestServer(t, srv.Handler())
 
 	ctx := context.Background()

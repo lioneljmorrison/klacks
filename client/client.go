@@ -20,7 +20,8 @@ import (
 )
 
 // Client is one device's reference client: its keys, its sessions, and its
-// connection to one klacks server (dev identity auth).
+// connection to one klacks server: dev identity auth, or a bearer token
+// (SetTokenSource).
 type Client struct {
 	base   string // REST base URL, http(s)://…
 	user   [16]byte
@@ -62,6 +63,11 @@ type Client struct {
 	// Distribute and Rotate, updated by removals and the members frame.
 	// The view is what rotation redistributes to.
 	roomPeers map[[16]byte][]Peer
+
+	// token, when set, supplies the bearer token for each REST call and
+	// WebSocket dial (SetTokenSource); unset, the client speaks the dev
+	// stub's identity claims.
+	token func(context.Context) (string, error)
 
 	// beforePublish, when set, runs after Send seals each envelope and
 	// before it is published (SetBeforePublish).
@@ -234,13 +240,32 @@ func (c *Client) NewOneTimePrekeys(n int) ([]OneTimePrekey, error) {
 	return opks, nil
 }
 
-// identity headers, the dev auth this reference client speaks.
-func (c *Client) authHeaders(req *http.Request) {
-	req.Header.Set("X-Klacks-User", format(c.user))
-	req.Header.Set("X-Klacks-Device", format(c.device))
+// SetTokenSource makes the client authenticate with a bearer token (S-31's
+// JWT auth) instead of the dev stub's identity claims. f is called for
+// every REST call and every Dial, so a redial can present a fresh token;
+// the token's subject and device must be this client's user and device.
+// Call it before the client makes any request.
+func (c *Client) SetTokenSource(f func(context.Context) (string, error)) {
+	c.token = f
 }
 
-// rest does one JSON REST call with dev auth headers.
+// authHeaders sets the request's credentials: the bearer token if the
+// client has a token source, else the dev stub's identity headers.
+func (c *Client) authHeaders(ctx context.Context, h http.Header) error {
+	if c.token == nil {
+		h.Set("X-Klacks-User", format(c.user))
+		h.Set("X-Klacks-Device", format(c.device))
+		return nil
+	}
+	tok, err := c.token(ctx)
+	if err != nil {
+		return fmt.Errorf("client: token: %w", err)
+	}
+	h.Set("Authorization", "Bearer "+tok)
+	return nil
+}
+
+// rest does one JSON REST call with the client's credentials.
 func (c *Client) rest(ctx context.Context, method, path string, body, out any) error {
 	var rdr io.Reader
 	if body != nil {
@@ -254,7 +279,9 @@ func (c *Client) rest(ctx context.Context, method, path string, body, out any) e
 	if err != nil {
 		return err
 	}
-	c.authHeaders(req)
+	if err := c.authHeaders(ctx, req.Header); err != nil {
+		return err
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpc.Do(req)
 	if err != nil {
