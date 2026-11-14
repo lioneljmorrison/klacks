@@ -116,8 +116,18 @@ func (c *Client) Subscribe(ctx context.Context, room [16]byte) error {
 	return c.sendFrame(ctx, &protocol.Subscribe{RoomID: protocol.UUID(room)})
 }
 
-// Publish sends one already-sealed envelope.
+// publish sends one already-sealed envelope, after the BeforePublish hook
+// (see SetBeforePublish): every chain step it carries is saved before it
+// leaves. A hook error stops it.
 func (c *Client) publish(ctx context.Context, room [16]byte, e encryptResult) error {
+	c.mu.Lock()
+	save := c.beforePublish
+	c.mu.Unlock()
+	if save != nil {
+		if err := save(); err != nil {
+			return err
+		}
+	}
 	return c.sendFrame(ctx, &protocol.Publish{
 		RoomID:     protocol.UUID(room),
 		MessageID:  protocol.UUID(e.MessageID),
@@ -135,14 +145,6 @@ func (c *Client) Send(ctx context.Context, room [16]byte, peers []Peer, plaintex
 		e, err := c.sealFor(ctx, room, p, plaintext)
 		if err != nil {
 			return err
-		}
-		c.mu.Lock()
-		save := c.beforePublish
-		c.mu.Unlock()
-		if save != nil {
-			if err := save(); err != nil {
-				return err
-			}
 		}
 		if err := c.publish(ctx, room, e); err != nil {
 			return err
