@@ -82,6 +82,11 @@ default pool.**
 - Not covered: multiple server nodes, a remote database, rate limits (S-32
   limits are off on this branch's base).
 
+## Case study (S-54)
+
+Rate sweeps and tuning on M4, WSL and lab-hermes (150 runs): see
+[performance-case-study.md](performance-case-study.md).
+
 ## Performance gate (S-53)
 
 `make perf` turns the load test into a pass/fail check. It builds
