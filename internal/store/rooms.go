@@ -47,6 +47,15 @@ func NewRooms(pool *pgxpool.Pool, lockTimeout time.Duration) *Rooms {
 	return &Rooms{pool: pool, lockTimeout: lockTimeout}
 }
 
+// beginSQL opens a Locked transaction with its timeouts. The values are
+// integer milliseconds, formatted here, never caller text.
+func (r *Rooms) beginSQL() string {
+	ms := strconv.FormatInt(r.lockTimeout.Milliseconds(), 10)
+	return "BEGIN; SET LOCAL lock_timeout = " + ms +
+		"; SET LOCAL statement_timeout = " + ms +
+		"; SET LOCAL idle_in_transaction_session_timeout = " + ms
+}
+
 // CreateRoom creates a room of the given kind with a generated ID, its
 // room_seq counter, and owner as its first member with ownerRole, in one
 // transaction.
@@ -95,14 +104,11 @@ func createRoomSeqAndMember(ctx context.Context, tx pgx.Tx, room UUID, owner UUI
 // calling fn, if the room does not exist.
 func (r *Rooms) Locked(ctx context.Context, room UUID, fn func(context.Context, *LockedRoom) error) error {
 	var locked time.Time
-	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		// set_config(..., true) is SET LOCAL: it lasts for this transaction.
-		ms := strconv.FormatInt(r.lockTimeout.Milliseconds(), 10)
-		if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true),
-			set_config('statement_timeout', $1, true),
-			set_config('idle_in_transaction_session_timeout', $1, true)`, ms); err != nil {
-			return fmt.Errorf("rooms: set timeouts: %w", err)
-		}
+	// The timeouts ride on BEGIN, in the same round trip (S-48): pgx sends a
+	// BeginQuery without arguments as one simple-protocol message, and SET
+	// LOCAL lasts for this transaction. lock_timeout is in force before the
+	// FOR UPDATE below waits for the row lock.
+	err := pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{BeginQuery: r.beginSQL()}, func(tx pgx.Tx) error {
 		l := &LockedRoom{tx: tx, room: room}
 		err := tx.QueryRow(ctx, `SELECT next_seq FROM room_seq WHERE room_id = $1 FOR UPDATE`, room).Scan(&l.nextSeq)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -237,21 +243,36 @@ func (r *Rooms) Watermark(ctx context.Context, room UUID) (int64, error) {
 	return next - 1, nil
 }
 
+// RoleAndWriteTS returns user's role in the room (ok is false if user is
+// not a member) and the next ScyllaDB write timestamp from the
+// message_write_ts sequence, in one round trip (S-48). Both are read in a
+// statement of their own after the FOR UPDATE, so after the lock is
+// granted: the role sees any membership change that committed while this
+// call waited for the lock, and the timestamp is higher than that of any
+// earlier attempt at the same seq, so a retry overwrites an orphan (plan
+// §3.3c). Neither may be folded into the FOR UPDATE query: under READ
+// COMMITTED a command that waited for a row lock "does not see effects of
+// those commands on other rows in the database", while later commands in
+// the transaction do (PostgreSQL docs, Read Committed Isolation Level), so
+// the role must come from a later statement; and nothing documents that a
+// select-list nextval runs after the lock wait. A non-member still consumes
+// a timestamp; the sequence only has to increase.
+func (l *LockedRoom) RoleAndWriteTS(ctx context.Context, user UUID) (role string, ok bool, ts int64, err error) {
+	var r *string
+	err = l.tx.QueryRow(ctx, `SELECT (SELECT role FROM room_members WHERE room_id = $1 AND user_id = $2),
+		nextval('message_write_ts')`, l.room, user).Scan(&r, &ts)
+	if err != nil {
+		return "", false, 0, fmt.Errorf("rooms: role and write timestamp: %w", err)
+	}
+	if r == nil {
+		return "", false, ts, nil
+	}
+	return *r, true, ts, nil
+}
+
 // NextSeq is the seq the next published message gets: the locked
 // room_seq.next_seq. The committed watermark (hi) is NextSeq - 1.
 func (l *LockedRoom) NextSeq() int64 { return l.nextSeq }
-
-// WriteTS returns the next ScyllaDB write timestamp from the
-// message_write_ts sequence. Taken under the room lock, it is higher than
-// that of any earlier attempt at the same seq, so a retry overwrites an
-// orphan (plan §3.3c).
-func (l *LockedRoom) WriteTS(ctx context.Context) (int64, error) {
-	var ts int64
-	if err := l.tx.QueryRow(ctx, `SELECT nextval('message_write_ts')`).Scan(&ts); err != nil {
-		return 0, fmt.Errorf("rooms: write timestamp: %w", err)
-	}
-	return ts, nil
-}
 
 // AdvanceSeq sets next_seq to NextSeq + 1. It takes effect when the
 // enclosing Locked call commits.
