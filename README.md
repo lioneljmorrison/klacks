@@ -66,6 +66,9 @@ licensing note on libsignal.
 
 ## Layout
 
+See [docs/architecture.md](docs/architecture.md) for a diagram of how the
+packages, transports and stores connect.
+
 ```
 cmd/klacks           the server binary (serve, migrate, config)
 api/proto            protobuf definitions; api/gen holds generated code
