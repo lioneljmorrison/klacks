@@ -49,16 +49,36 @@ func (r *Rooms) CreateRoom(ctx context.Context, kind string, owner UUID, ownerRo
 		if err := tx.QueryRow(ctx, `INSERT INTO rooms (id, kind) VALUES (gen_random_uuid(), $1) RETURNING id`, kind).Scan(&room); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO room_seq (room_id) VALUES ($1)`, room); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `INSERT INTO room_members (room_id, user_id, role) VALUES ($1, $2, $3)`, room, owner, ownerRole)
-		return err
+		return createRoomSeqAndMember(ctx, tx, room, owner, ownerRole)
 	})
 	if err != nil {
 		return UUID{}, fmt.Errorf("rooms: create: %w", err)
 	}
 	return room, nil
+}
+
+// CreateRoomWithID creates a room with the caller's chosen ID — the
+// deterministic UUID a human-readable name resolves to. An ID that already
+// exists fails with the driver's unique-violation error, which the caller
+// surfaces as "already exists".
+func (r *Rooms) CreateRoomWithID(ctx context.Context, room UUID, kind string, owner UUID, ownerRole string) error {
+	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO rooms (id, kind) VALUES ($1, $2)`, room, kind); err != nil {
+			return err
+		}
+		return createRoomSeqAndMember(ctx, tx, room, owner, ownerRole)
+	})
+}
+
+// createRoomSeqAndMember is the room_seq and owner-member half of room
+// creation, shared by both entry points. It runs inside the caller's
+// transaction, after the rooms row exists.
+func createRoomSeqAndMember(ctx context.Context, tx pgx.Tx, room UUID, owner UUID, ownerRole string) error {
+	if _, err := tx.Exec(ctx, `INSERT INTO room_seq (room_id) VALUES ($1)`, room); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO room_members (room_id, user_id, role) VALUES ($1, $2, $3)`, room, owner, ownerRole)
+	return err
 }
 
 // Locked runs fn in a transaction that holds the room's room_seq row

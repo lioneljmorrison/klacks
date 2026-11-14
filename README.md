@@ -33,6 +33,80 @@ curl localhost:8080/readyz
 | `make migrate-down STORE=scylla N=1` | Roll back one store |
 | `make migrate-force STORE=… TO=N` | Clear a dirty store after a manual fix |
 | `make proto` | Lint the protos and regenerate `api/gen` |
+| `make test-web` | Regenerate the dev UI's interop vectors and run its Node tests |
+
+## Test clients
+
+Two test clients exist for exercising a running dev server end to end
+(rooms, resume, backpressure, E2EE interop). Both need `env=dev`, whose
+authenticator trusts any claimed identity. Neither requires a UUID: rooms,
+users and devices accept plain human names, which resolve deterministically
+to UUIDs (see [Names](#names)).
+
+- **`cmd/testchat`** — a Go CLI built on the reference client
+  (`client/`). Room management goes through the server's dev room API;
+  messaging speaks E2EE over REST + WebSocket:
+  `go run ./cmd/testchat -user alice` (add `-base` when the server is not
+  on `:8090`). Then `/create standup`, `/invite standup bob`,
+  `/join standup`, `/send standup hello`. `/drop` simulates an outage,
+  `/dial` reconnects, `/resume` replays, `/members` refreshes the member
+  list, `/status` reports the session.
+  The device's keys and ratchet sessions persist in `~/.klacks-testchat`,
+  so the same `-user` is the same device with the same sessions on every
+  run: messages peers seal while the CLI is down, or sent over its
+  sessions before a restart, decrypt after it (`-fresh` starts over with
+  new keys and no sessions). After a `make nuke`, start each CLI device
+  with `-fresh`: room seqs restart at 1, and saved sessions remember the
+  seqs their peers' initiations arrived at, so they would refuse a peer's
+  new session as a replay of an old one. Sessions are saved before every publish and after every
+  delivery, so a crash can't make the CLI reuse a message key. `/send`
+  watches a room live; `/join` or `/resume` replay its history.
+- **The dev UI** — a browser client with full E2EE (X3DH + Double Ratchet
+  in WebCrypto plus its own ChaCha20-Poly1305), served by the dev server
+  itself at `GET /devui` (same origin, because `/ws` rejects cross-origin
+  upgrades). Three steps, no UUIDs and no jargon: type your name and hit
+  Start (keys, bundle registration and connecting are automatic), type a
+  room name and hit Open (creates it if it doesn't exist, joins if it
+  does), chat. Invite people by name from the chat; a reload offers
+  "Continue as …" with the same keys and sessions, and reopening a room
+  resumes after the last message this browser processed. The member list
+  is refreshed from the server before every send. Sender-key group
+  broadcasts are reported, not decrypted.
+
+The browser client's crypto is kept byte-compatible with the Go reference
+by test vectors (`client/jsvectors_test.go` generates them from pinned
+keys; `node --test internal/api/devui/interop/` replays them through the
+JavaScript) — `make test-web` runs both halves, including the name
+mappings.
+
+## Names
+
+Test-client names resolve to UUIDs with UUIDv5 (SHA-1) under one fixed
+namespace (`internal/names`, mirrored by `internal/api/devui/web/js/names.mjs`):
+
+- user `alice` → `v5(ns, "user/alice")`
+- device `phone` of user alice → `v5(ns, "device/<alice's user UUID>/phone")`
+- room `standup` → `v5(ns, "room/standup")`
+
+No server state, no shared storage: every client resolves the same name to
+the same UUID offline. A canonical UUID is accepted anywhere a name is and
+takes precedence, so nothing blocks explicit identities.
+
+## Dev-only endpoints (env=dev)
+
+Alongside `/ws` and the prekey API, a dev server also serves:
+
+- `GET /devui` — the browser test client above.
+- `POST /v1/dev/rooms` — create a room (optional caller-chosen
+  `room_id`, `kind` dm/group/space, `members` to invite). The
+  authenticated user becomes its owner.
+- `POST /v1/dev/rooms/{room}/members` — invite one user
+  (`user`, optional `role`).
+- `DELETE /v1/dev/rooms/{room}/members/{user}` — remove a member.
+- `GET /v1/dev/rooms/{room}/members` — list members.
+
+These shim `pkg/chat`'s room management over REST for testing only; none
+of it exists outside env=dev.
 
 ## Configuration
 
@@ -71,13 +145,16 @@ packages, transports and stores connect.
 
 ```
 cmd/klacks           the server binary (serve, migrate, config)
+cmd/testchat         the Go CLI test client (rooms + E2EE messaging)
 api/proto            protobuf definitions; api/gen holds generated code
 examples/meetings    the toy meeting scheduler, an embedding example
 internal/config      configuration loading and validation
 internal/logging     slog setup (text in dev, JSON in prod)
 internal/api         transports (HTTP now; WebSocket and gRPC later)
+internal/api/devui   the browser test client, served at /devui in dev
 internal/api/grpcapi the gRPC adapter over pkg/chat (not served yet)
 internal/core        rooms, sequencing, fan-out, resume
+internal/names       human name → UUID mapping (test clients)
 internal/store       PostgreSQL + ScyllaDB access, migrations
 migrations/          embedded schema migrations for both stores
 pkg/chat             the public, importable ChatService

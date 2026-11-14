@@ -115,6 +115,14 @@ migrate-create: ## New empty migration pair: STORE=postgres|scylla NAME=short_na
 fmt: ## Format the code
 	gofmt -s -w .
 
+##@ Dev UI (browser test client, internal/api/devui)
+
+.PHONY: test-web
+test-web: ## Regenerate interop vectors and run the dev UI's Node tests
+	KLACKS_JS_VECTORS_OUT=$(abspath internal/api/devui/interop/testdata/vectors.json) \
+		go test -count=1 -run TestGenerateJSInteropVectors ./client
+	node --test internal/api/devui/interop/*.test.mjs
+
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum
 	go mod tidy

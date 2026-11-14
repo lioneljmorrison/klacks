@@ -63,6 +63,10 @@ type Client struct {
 	// The view is what rotation redistributes to.
 	roomPeers map[[16]byte][]Peer
 
+	// beforePublish, when set, runs after Send seals each envelope and
+	// before it is published (SetBeforePublish).
+	beforePublish func() error
+
 	// The WebSocket connection and its read loop, replaced under mu by
 	// each Dial. A read loop gets its connection and context as arguments
 	// and never reads these fields, so a loop that outlives its connection
@@ -197,6 +201,21 @@ func (c *Client) OneTimePrekeysHeld() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.opkPrivs)
+}
+
+// HeldOneTimePrekeys returns copies of the one-time prekey pairs the client
+// still holds, for callers that persist key material (the keyfile sync in
+// cmd/testchat). The client keeps a private's half after the server has
+// deleted the public one only until an initiation consumes it; what is
+// held here is exactly what a restart must carry forward.
+func (c *Client) HeldOneTimePrekeys() []OneTimePrekey {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]OneTimePrekey, 0, len(c.opkPrivs))
+	for _, p := range c.opkPrivs {
+		out = append(out, p)
+	}
+	return out
 }
 
 // NewOneTimePrekeys generates n keys locally and returns them for upload.

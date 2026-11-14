@@ -62,7 +62,9 @@ func (c *Client) Disconnect() {
 	}
 }
 
-// Close closes the connection and the client's channels.
+// Close closes the connection and the client's channels. A client that
+// never dialed has no read loop to wait for; closing still empties the
+// channels its callers may be selecting on.
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
 		c.mu.Lock()
@@ -133,6 +135,14 @@ func (c *Client) Send(ctx context.Context, room [16]byte, peers []Peer, plaintex
 		e, err := c.sealFor(ctx, room, p, plaintext)
 		if err != nil {
 			return err
+		}
+		c.mu.Lock()
+		save := c.beforePublish
+		c.mu.Unlock()
+		if save != nil {
+			if err := save(); err != nil {
+				return err
+			}
 		}
 		if err := c.publish(ctx, room, e); err != nil {
 			return err

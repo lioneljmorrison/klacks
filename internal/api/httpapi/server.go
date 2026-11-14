@@ -52,6 +52,11 @@ func NewServer(cfg config.HTTP, health *Health, ws http.Handler, devices *Device
 // the handler on their own listener.
 func (s *Server) Handler() http.Handler { return s.srv.Handler }
 
+// UseHandler replaces the server's handler. It must be called before
+// ListenAndServe or Serve, which start serving. Callers that wrap the
+// routes (Handler()) in an outer mux use it to mount the wrapper.
+func (s *Server) UseHandler(h http.Handler) { s.srv.Handler = h }
+
 // OnShutdown registers f to run when shutdown begins, for long-lived
 // connections (such as WebSockets) that Shutdown does not track.
 func (s *Server) OnShutdown(f func()) { s.srv.RegisterOnShutdown(f) }
