@@ -34,13 +34,15 @@ func (c *Client) Dial(ctx context.Context) error {
 		_ = resp.Body.Close()
 	}
 	conn.SetReadLimit(-1)
+	readCtx, readCancel := context.WithCancel(context.WithoutCancel(ctx))
+	readerDone := make(chan struct{})
 	c.mu.Lock()
 	c.conn = conn
-	c.readCtx, c.readCancel = context.WithCancel(context.WithoutCancel(ctx))
-	c.readerDone = make(chan struct{})
-	c.readStarted = true
+	c.readCancel = readCancel
+	c.readerDone = readerDone
 	c.mu.Unlock()
-	go c.readLoop()
+	c.readers.Add(1)
+	go c.readLoop(readCtx, conn, readerDone)
 	return nil
 }
 
@@ -66,22 +68,21 @@ func (c *Client) Disconnect() {
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
 		c.mu.Lock()
-		started := c.readStarted
+		readCancel, conn := c.readCancel, c.conn
 		c.mu.Unlock()
-		if c.readCancel != nil {
-			c.readCancel()
+		if readCancel != nil {
+			readCancel()
 		}
-		if c.conn != nil {
-			_ = c.conn.Close(websocket.StatusNormalClosure, "")
+		if conn != nil {
+			_ = conn.Close(websocket.StatusNormalClosure, "")
 		}
-		// The read loop is the only sender on Inbox and Errs: wait for it
-		// to exit before closing what it feeds — but only when one is
-		// running, or Close would block forever on a client that never
-		// dialed.
-		if started {
-			<-c.readerDone
-		}
+		// done first: it releases a loop blocked handing an event to a
+		// full Inbox or Errs. The read loops — the current one and any a
+		// Disconnect left finishing a delivery — are the only senders on
+		// Inbox and Errs: wait for all of them before closing what they
+		// feed. A client that never dialed has none to wait for.
 		close(c.done)
+		c.readers.Wait()
 		close(c.Inbox)
 		close(c.Errs)
 	})
@@ -89,14 +90,17 @@ func (c *Client) Close() {
 
 // sendFrame writes one frame.
 func (c *Client) sendFrame(ctx context.Context, f protocol.Frame) error {
-	if c.conn == nil {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
 		return errors.New("client: not connected")
 	}
 	b, err := protocol.Encode(f)
 	if err != nil {
 		return err
 	}
-	return c.conn.Write(ctx, websocket.MessageText, b)
+	return conn.Write(ctx, websocket.MessageText, b)
 }
 
 // Resume asks for every message in room after lastSeen, then live delivery.
@@ -149,12 +153,14 @@ func (c *Client) Send(ctx context.Context, room [16]byte, peers []Peer, plaintex
 
 // readLoop consumes frames until the connection or the client ends. Delivers
 // go through the ordering check and the ratchet; error frames and read
-// failures surface on Errs.
-func (c *Client) readLoop() {
-	defer close(c.readerDone)
+// failures surface on Errs. It reads only conn, the connection it was
+// started for, under that connection's ctx; done closes when it exits.
+func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, done chan struct{}) {
+	defer c.readers.Done()
+	defer close(done)
 	for {
 		var f protocol.Frame
-		err := c.readFrame(&f)
+		err := readFrame(ctx, conn, &f)
 		if err != nil {
 			select {
 			case <-c.done:
@@ -181,8 +187,8 @@ func (c *Client) readLoop() {
 
 // readFrame reads one text frame and decodes it. The server's messages are
 // server-to-client frames.
-func (c *Client) readFrame(out *protocol.Frame) error {
-	kind, data, err := c.conn.Read(c.readCtx)
+func readFrame(ctx context.Context, conn *websocket.Conn, out *protocol.Frame) error {
+	kind, data, err := conn.Read(ctx)
 	if err != nil {
 		return err
 	}
