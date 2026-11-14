@@ -49,6 +49,52 @@ type config struct {
 	dialers          int
 	runID            string
 	phase            string
+	maxP99           time.Duration
+}
+
+// result is what a load run measured, for the gate's verdict.
+type result struct {
+	p99                       time.Duration
+	expected, delivered       int64
+	gaps, errFrames           int
+	pubErrs, slowDisconnects  int64
+	roomsWithHistory, resumed int
+}
+
+// maxShortfall is the fraction of expected deliveries a run may miss and
+// still pass: deliveries in flight when the drain ends are not counted,
+// while a lost message also shows up as a seq gap or a short resume.
+const maxShortfall = 0.001
+
+// check returns one failure per threshold r misses (none: the run passes).
+// A zero maxP99 reports latency without checking it.
+func check(r result, maxP99 time.Duration) []string {
+	var f []string
+	if r.expected == 0 {
+		return []string{"no measured deliveries were expected: nothing was published in the measured window"}
+	}
+	if maxP99 > 0 && r.p99 > maxP99 {
+		f = append(f, fmt.Sprintf("delivery p99 %v is over the %v limit", r.p99, maxP99))
+	}
+	if r.gaps > 0 {
+		f = append(f, fmt.Sprintf("%d seq gap(s) seen", r.gaps))
+	}
+	if r.errFrames > 0 {
+		f = append(f, fmt.Sprintf("%d error frame(s) received", r.errFrames))
+	}
+	if r.pubErrs > 0 {
+		f = append(f, fmt.Sprintf("%d publish write error(s)", r.pubErrs))
+	}
+	if r.slowDisconnects > 0 {
+		f = append(f, fmt.Sprintf("%d slow-consumer disconnect(s)", r.slowDisconnects))
+	}
+	if short := r.expected - r.delivered; float64(short) > maxShortfall*float64(r.expected) {
+		f = append(f, fmt.Sprintf("%d of %d expected deliveries missing", short, r.expected))
+	}
+	if r.resumed < r.roomsWithHistory {
+		f = append(f, fmt.Sprintf("%d of %d rooms did not finish the resume phase", r.roomsWithHistory-r.resumed, r.roomsWithHistory))
+	}
+	return f
 }
 
 func main() {
@@ -64,6 +110,7 @@ func main() {
 	flag.IntVar(&c.dialers, "dialers", 200, "concurrent dials while connecting")
 	flag.StringVar(&c.runID, "run-id", "", "UUID naming this run's rooms and users (default: random); reuse it for -phase resume")
 	flag.StringVar(&c.phase, "phase", "load", "load: create rooms, connect, publish, resume; resume: only resume each room from 0 (run after restarting the server, so reads come from ScyllaDB, not the replay buffer)")
+	flag.DurationVar(&c.maxP99, "max-p99", 0, "load phase: fail (exit 1) if delivery p99 exceeds this; seq gaps, error frames, publish errors, slow-consumer disconnects, missing deliveries and unfinished resumes always fail (0: don't check p99)")
 	flag.Parse()
 	if err := run(context.Background(), c, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "klacksload:", err)
@@ -171,9 +218,14 @@ func run(ctx context.Context, c config, out io.Writer) error {
 	fmt.Fprintf(out, "seq gaps seen: %d, error frames: %d\n", gaps, errFrames)
 
 	t0 = time.Now()
-	resumed := resumeAll(ctx, rooms)
-	fmt.Fprintf(out, "resume phase: %d rooms resumed from 0 in %v\n", resumed, time.Since(t0).Round(time.Millisecond))
+	resumed, withHistory := resumeAll(ctx, rooms)
+	fmt.Fprintf(out, "resume phase: %d of %d rooms resumed from 0 in %v\n", resumed, withHistory, time.Since(t0).Round(time.Millisecond))
 
+	res := result{
+		p99: s.P99, expected: expected, delivered: int64(s.N),
+		gaps: gaps, errFrames: errFrames, pubErrs: pubErrs,
+		roomsWithHistory: withHistory, resumed: resumed,
+	}
 	if c.metrics != "" {
 		text, err := scrape(c.metrics)
 		if err != nil {
@@ -191,10 +243,21 @@ func run(ctx context.Context, c config, out io.Writer) error {
 		fmt.Fprintf(out, "  pg pool acquired: max sampled %.0f of %.0f\n", poolMax.stop(), maxConns)
 		if v, ok := gaugeValue(text, "klacks_ws_slow_disconnects_total"); ok {
 			fmt.Fprintf(out, "  slow-consumer disconnects: %.0f\n", v)
+			res.slowDisconnects = int64(v)
 		}
 	}
 	for _, cn := range all {
 		_ = cn.ws.Close(websocket.StatusNormalClosure, "")
+	}
+	if f := check(res, c.maxP99); len(f) > 0 {
+		fmt.Fprintln(out, "\nFAIL")
+		for _, s := range f {
+			fmt.Fprintln(out, "  "+s)
+		}
+		return fmt.Errorf("%d check(s) failed", len(f))
+	}
+	if c.maxP99 > 0 {
+		fmt.Fprintf(out, "\nPASS (p99 limit %v)\n", c.maxP99)
 	}
 	return nil
 }
@@ -335,9 +398,10 @@ func (cn *conn) read(measuring *atomic.Bool) {
 }
 
 // resumeAll resumes each room from 0 on one member's connection and waits
-// until it has replayed up to that member's last seq.
-func resumeAll(ctx context.Context, rooms []*room) int {
-	var done atomic.Int64
+// until it has replayed up to that member's last seq. It returns the rooms
+// that finished and the rooms that had history to replay.
+func resumeAll(ctx context.Context, rooms []*room) (resumed, withHistory int) {
+	var done, history atomic.Int64
 	_ = parallel(len(rooms), 50, func(i int) error {
 		cn := rooms[i].members[0]
 		ch := make(chan int64, 1024)
@@ -353,6 +417,7 @@ func resumeAll(ctx context.Context, rooms []*room) int {
 		if target == 0 {
 			return nil
 		}
+		history.Add(1)
 		if err := cn.send(ctx, &protocol.Resume{RoomID: protocol.UUID(rooms[i].id)}); err != nil {
 			return nil
 		}
@@ -369,7 +434,7 @@ func resumeAll(ctx context.Context, rooms []*room) int {
 			}
 		}
 	})
-	return int(done.Load())
+	return int(done.Load()), int(history.Load())
 }
 
 // coldResume connects one member per room and resumes it from 0, reading
