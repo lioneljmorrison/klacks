@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -105,5 +106,54 @@ func TestCheck(t *testing.T) {
 		if len(f) != 1 || !strings.Contains(f[0], tc.want) {
 			t.Errorf("%s: failures = %q; want one mentioning %q", name, f, tc.want)
 		}
+	}
+}
+
+// A run's JSON record carries config, client latencies, server metrics,
+// the verdict and the caller's labels; failing runs are recorded too.
+func TestRecordJSON(t *testing.T) {
+	c := config{rooms: 1000, members: 10, rate: 500, duration: time.Minute, warmup: 10 * time.Second, size: 256, maxP99: 200 * time.Millisecond}
+	s := stats{N: 9, P50: 2 * time.Millisecond, P95: 3500 * time.Microsecond, P99: 300 * time.Millisecond, Max: time.Second}
+	r := result{p99: s.P99, expected: 10, delivered: 9, roomsWithHistory: 4, resumed: 4}
+	srv := serverStats{LockP50Ms: 2, LockP99Ms: 8, PoolPeak: 50, PoolMax: 60}
+	var labels labelFlag
+	for _, kv := range []string{"machine=m4", "variant=s48"} {
+		if err := labels.Set(kv); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if labels.Set("nokey") == nil {
+		t.Fatal("label without = accepted")
+	}
+	var b strings.Builder
+	if err := writeRecord(&b, newRecord(c, s, r, srv, check(r, c.maxP99), labels)); err != nil {
+		t.Fatal(err)
+	}
+	line := b.String()
+	if strings.Count(line, "\n") != 1 || !strings.HasSuffix(line, "\n") {
+		t.Fatalf("not one JSON line: %q", line)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(line), &got); err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]any{
+		"rate": 500.0, "rooms": 1000.0, "members": 10.0, "duration_s": 60.0,
+		"p50_ms": 2.0, "p95_ms": 3.5, "p99_ms": 300.0, "max_ms": 1000.0,
+		"expected": 10.0, "delivered": 9.0, "pass": false,
+		"lock_p99_ms": 8.0, "pool_peak": 50.0,
+	} {
+		if got[k] != want {
+			t.Errorf("%s = %v; want %v", k, got[k], want)
+		}
+	}
+	if f, _ := got["failures"].([]any); len(f) != 2 {
+		t.Errorf("failures = %v; want p99 and missing", got["failures"])
+	}
+	if l, _ := got["labels"].(map[string]any); l["machine"] != "m4" || l["variant"] != "s48" {
+		t.Errorf("labels = %v", got["labels"])
+	}
+	if _, ok := got["time"].(string); !ok {
+		t.Error("no time")
 	}
 }
