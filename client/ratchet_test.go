@@ -8,7 +8,7 @@ import (
 
 // ratchetPair builds a working session pair: alice initiated against bob's
 // bundle; bob holds the responder state.
-func ratchetPair(t *testing.T) (alice, bob *Ratchet, ad []byte) {
+func ratchetPair(t testing.TB) (alice, bob *Ratchet, ad []byte) {
 	t.Helper()
 	aliceID := newPeerKeys(t, 0)
 	bobID := newPeerKeys(t, 1)
