@@ -156,7 +156,7 @@ func Open(ctx context.Context, cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("chat: scylla: %w (have the stores been migrated up?)", err)
 	}
 
-	s, _ := newService(cfg, pool, sc, nil, nil)
+	s, _ := newService(cfg, pool, store.NewRooms(pool, cfg.RoomLockTimeout), store.NewScyllaMessages(sc), nil, nil)
 	s.pool, s.scylla = pool, sc
 	return s, nil
 }
@@ -166,11 +166,13 @@ func Open(ctx context.Context, cfg Config) (*Service, error) {
 // one core over both WebSocket and gRPC (S-45): onPosted and onRemoved,
 // when set, also receive the core's post-commit fan-out and membership
 // removals, so each transport sees the other's messages live and a removal
-// through either reaches both hubs. Its parameters are internal types; it
-// is not part of the embedding API. Of cfg, only Actor, SendQueue,
-// RoomLockTimeout, OnMemberRemoved and Log are used. Close leaves pool and
-// sc open: the caller owns them.
-func NewShared(cfg Config, pool *pgxpool.Pool, sc *gocql.Session,
+// through either reaches both hubs. rooms and messages are the caller's,
+// so it can instrument them (S-37 metrics) once for both transports; pool
+// serves the device registry. Its parameters are internal types; it is not
+// part of the embedding API. Of cfg, only Actor, SendQueue,
+// OnMemberRemoved and Log are used. Close leaves the stores open: the
+// caller owns them.
+func NewShared(cfg Config, pool *pgxpool.Pool, rooms *store.Rooms, messages store.MessageStore,
 	onPosted func(context.Context, store.Message), onRemoved func(context.Context, core.MemberRemoved),
 ) (*Service, *core.Service, error) {
 	if cfg.Actor == (UserID{}) {
@@ -179,14 +181,14 @@ func NewShared(cfg Config, pool *pgxpool.Pool, sc *gocql.Session,
 	if cfg.SendQueue < 0 {
 		return nil, nil, fmt.Errorf("chat: %w: send queue must not be negative", ErrInvalidArgument)
 	}
-	s, c := newService(cfg, pool, sc, onPosted, onRemoved)
+	s, c := newService(cfg, pool, rooms, messages, onPosted, onRemoved)
 	return s, c, nil
 }
 
-// newService wires a Service and its core over pool and sc. The core's
+// newService wires a Service and its core over the stores. The core's
 // fan-out goes to the Service's hub, then to onPosted; its removals to
 // cfg.OnMemberRemoved, then to onRemoved.
-func newService(cfg Config, pool *pgxpool.Pool, sc *gocql.Session,
+func newService(cfg Config, pool *pgxpool.Pool, rooms *store.Rooms, messages store.MessageStore,
 	onPosted func(context.Context, store.Message), onRemoved func(context.Context, core.MemberRemoved),
 ) (*Service, *core.Service) {
 	log := cfg.Log
@@ -217,7 +219,7 @@ func newService(cfg Config, pool *pgxpool.Pool, sc *gocql.Session,
 			}
 		}
 	}
-	s.core = core.New(store.NewRooms(pool, cfg.RoomLockTimeout), store.NewScyllaMessages(sc), posted, removed)
+	s.core = core.New(rooms, messages, posted, removed)
 	return s, s.core
 }
 

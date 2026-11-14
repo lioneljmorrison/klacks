@@ -106,6 +106,11 @@ func newServers(cfg config.Config, pg *pgxpool.Pool, scylla *gocql.Session, log 
 		s.mgr = ws.NewManager(a, log)
 	}
 
+	// The room and message stores are built once, for whichever core
+	// serves: anything that instruments them sees both transports.
+	rooms := store.NewRooms(pg, roomLockTimeout)
+	var messages store.MessageStore = store.NewScyllaMessages(scylla)
+
 	// One core serves both transports. Its post-commit fan-out and its
 	// removals reach the WebSocket hub and, with gRPC, the chat service's
 	// subscription hub, so each transport sees the other's messages live
@@ -125,10 +130,9 @@ func newServers(cfg config.Config, pg *pgxpool.Pool, scylla *gocql.Session, log 
 			posted, removed = s.mgr.Deliver, s.mgr.MemberRemoved
 		}
 		s.chat, svc, err = chat.NewShared(chat.Config{
-			Actor:           chat.UserID(actor),
-			RoomLockTimeout: roomLockTimeout,
-			Log:             log,
-		}, pg, scylla, posted, removed)
+			Actor: chat.UserID(actor),
+			Log:   log,
+		}, pg, rooms, messages, posted, removed)
 		if err != nil {
 			return nil, err
 		}
@@ -140,7 +144,7 @@ func newServers(cfg config.Config, pg *pgxpool.Pool, scylla *gocql.Session, log 
 			log.Warn("grpc is plaintext (no grpc.tls_cert_file): service tokens cross the network in the clear unless a TLS proxy fronts it")
 		}
 	} else if s.mgr != nil {
-		svc = core.New(store.NewRooms(pg, roomLockTimeout), store.NewScyllaMessages(scylla), s.mgr.Deliver, s.mgr.MemberRemoved)
+		svc = core.New(rooms, messages, s.mgr.Deliver, s.mgr.MemberRemoved)
 	}
 
 	if s.mgr != nil {
