@@ -70,6 +70,7 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		} else {
 			// Config validation allows origins only with JWT (S-43).
 			mgr.OriginPatterns = cfg.Auth.AllowedOrigins
+			devices.AllowedOrigins = cfg.Auth.AllowedOrigins // S-50
 			log.Info("client auth is JWT", "issuer", cfg.Auth.JWT.Issuer, "audience", cfg.Auth.JWT.Audience,
 				"allowed_origins", cfg.Auth.AllowedOrigins)
 		}
