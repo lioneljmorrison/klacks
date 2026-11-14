@@ -24,6 +24,9 @@ end-to-end encryption. The design lives in
   target `dev`.
 - `main` is the release branch. Only `dev` merges into `main`, through a PR,
   and releases (git tags + `gh release create`) are cut from `main`.
+- Before a `dev`→`main` PR merges, `make perf` (the G-8 performance gate,
+  docs/loadtest.md) must pass on the full profile; the PR records the
+  machine and its report.
 - Never commit directly to `main`, and never force-push.
 
 ## How this project tracks
