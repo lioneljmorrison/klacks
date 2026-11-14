@@ -193,8 +193,9 @@ func (a *app) cmdMembers(ctx context.Context, args []string) {
 	a.outf("members of %s: %s", uuidString(room), resp.Members)
 }
 
-// cmdJoin subscribes to a room by name or UUID: resume from 0 replays its
-// history and subscribes live delivery.
+// cmdJoin subscribes to a room by name or UUID: it resumes from where this
+// device left off (0 for a room it never read, which replays the history)
+// and subscribes live delivery.
 func (a *app) cmdJoin(ctx context.Context, args []string) {
 	if len(args) != 1 {
 		a.outf("usage: /join <roomNameOrUUID>")
@@ -208,15 +209,24 @@ func (a *app) cmdJoin(ctx context.Context, args []string) {
 	a.join(ctx, room)
 }
 
-// join resumes the room from 0 and makes sure it is tracked.
+// join resumes the room from the device's resume point and makes sure it
+// is tracked.
 func (a *app) join(ctx context.Context, room [16]byte) {
 	a.recordMember(room, a.user)
-	if err := a.c.Resume(ctx, room, 0); err != nil {
+	from := a.resumePoint(room)
+	if err := a.c.Resume(ctx, room, from); err != nil {
 		a.outf("join %s: resume failed: %v", uuidString(room), err)
 		return
 	}
 	a.markSubscribed(room)
-	a.outf("joined %s (resumed from 0)", uuidString(room))
+	a.outf("joined %s (resumed from %d)", uuidString(room), from)
+}
+
+// resumePoint is the last seq the device consumed in room, kept in the
+// client's saved state across restarts (S-42); 0 for a room it never read.
+func (a *app) resumePoint(room [16]byte) int64 {
+	seq, _ := a.c.LastSeq(room)
+	return seq
 }
 
 // resolveRoomArg resolves a room argument: canonical UUID or name.
