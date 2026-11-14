@@ -35,6 +35,11 @@ upgrade is a `403`. Each entry is a host pattern matched with Go's
 `path.Match` against the `Origin` host (`app.example.com`,
 `*.example.com`), or against `scheme://host` when it has a scheme
 (`https://app.example.com`). The list is only accepted with `auth.jwt`.
+The same origins may call the prekey bundle API cross-origin: it answers
+their `OPTIONS` preflight (allowing the route's method and the
+`Authorization` and `Content-Type` headers, without credentials) and sets
+`Access-Control-Allow-Origin` on their responses. Other origins get no CORS
+headers, so the browser blocks the call.
 
 The token is checked once, at the upgrade. A connection is not closed when
 its token later expires; the next reconnect needs a fresh one. The prekey
