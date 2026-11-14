@@ -81,24 +81,24 @@ func TestRoomsMembership(t *testing.T) {
 	if _, ok := role(t, rooms, room, user); ok {
 		t.Fatal("non-member has a role")
 	}
-	if err := locked(func(ctx context.Context, l *store.LockedRoom) error { return l.AddMember(ctx, user, "member") }); err != nil {
+	if err := locked(func(ctx context.Context, l *store.LockedRoom) error { return l.AddMember(ctx, owner, user, "member") }); err != nil {
 		t.Fatal(err)
 	}
 	if r, ok := role(t, rooms, room, user); !ok || r != "member" {
 		t.Fatalf("role = %q, %t; want member", r, ok)
 	}
-	err = locked(func(ctx context.Context, l *store.LockedRoom) error { return l.AddMember(ctx, user, "admin") })
+	err = locked(func(ctx context.Context, l *store.LockedRoom) error { return l.AddMember(ctx, owner, user, "admin") })
 	if !errors.Is(err, store.ErrAlreadyMember) {
 		t.Fatalf("re-add: err = %v, want ErrAlreadyMember", err)
 	}
 
-	if err := locked(func(ctx context.Context, l *store.LockedRoom) error { return l.RemoveMember(ctx, user) }); err != nil {
+	if err := locked(func(ctx context.Context, l *store.LockedRoom) error { return l.RemoveMember(ctx, owner, user) }); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := role(t, rooms, room, user); ok {
 		t.Fatal("removed member still has a role")
 	}
-	err = locked(func(ctx context.Context, l *store.LockedRoom) error { return l.RemoveMember(ctx, user) })
+	err = locked(func(ctx context.Context, l *store.LockedRoom) error { return l.RemoveMember(ctx, owner, user) })
 	if !errors.Is(err, store.ErrMemberNotFound) {
 		t.Fatalf("remove non-member: err = %v, want ErrMemberNotFound", err)
 	}
@@ -126,7 +126,7 @@ func TestRoomsLockedRollsBack(t *testing.T) {
 	}
 	boom := errors.New("boom")
 	err = rooms.Locked(ctx, room, func(ctx context.Context, l *store.LockedRoom) error {
-		if err := l.AddMember(ctx, id(0xb2), "member"); err != nil {
+		if err := l.AddMember(ctx, id(0xb1), id(0xb2), "member"); err != nil {
 			return err
 		}
 		return boom
