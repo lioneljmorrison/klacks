@@ -198,6 +198,13 @@ duplicate (plan §3.3c, known limitation).
 - **PostgreSQL**: a primary with a synchronous or promptly promoted
   standby, and WAL archiving as above. The room lock is a row lock, so one
   primary serves every klacks node.
+- **Pool size**: every publish holds a Postgres connection for its whole
+  locked transaction (~8 ms p50 in the S-34 load test, see
+  [loadtest.md](loadtest.md)). Set `pool_max_conns` in the DSN to at least
+  peak publishes/s × p99 lock hold, with headroom; the pgx default
+  (max(4, CPUs)) saturated at 1k publishes/s and pushed delivery p99 to
+  719 ms, while 60 gave 52 ms. Keep the sum over all klacks nodes under
+  PostgreSQL's `max_connections`.
 - **Room lock timeout** (10 s, `roomLockTimeout`) must exceed
   `KLACKS_SCYLLA_TIMEOUT`, since a publish holds the lock across its
   ScyllaDB write.
