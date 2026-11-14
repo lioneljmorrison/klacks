@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -37,6 +38,13 @@ type Config struct {
 // Auth configures client authentication.
 type Auth struct {
 	JWT JWT `json:"jwt"`
+
+	// AllowedOrigins lists the browser origins, besides klacks' own, that
+	// may open /ws (S-43): coder/websocket OriginPatterns, each matched with
+	// path.Match against the Origin host, or against "scheme://host" when
+	// the pattern has a scheme. JWT only: the dev stub's identity rides in
+	// the query string, so it keeps the same-origin check.
+	AllowedOrigins []string `json:"allowed_origins"`
 }
 
 // JWT configures verification of client bearer tokens (S-31): Ed25519
@@ -202,6 +210,9 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	str("KLACKS_AUTH_JWT_PUBLIC_KEY_FILE", &cfg.Auth.JWT.PublicKeyFile)
 	str("KLACKS_AUTH_JWT_ISSUER", &cfg.Auth.JWT.Issuer)
 	str("KLACKS_AUTH_JWT_AUDIENCE", &cfg.Auth.JWT.Audience)
+	if v := getenv("KLACKS_AUTH_ALLOWED_ORIGINS"); v != "" {
+		cfg.Auth.AllowedOrigins = splitList(v)
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("config: %w", errors.Join(errs...))
 	}
@@ -277,6 +288,14 @@ func (c Config) Validate() error {
 			bad("auth.jwt.audience is required with auth.jwt.public_key_file (KLACKS_AUTH_JWT_AUDIENCE)")
 		}
 	}
+	if len(c.Auth.AllowedOrigins) > 0 && !c.Auth.JWT.Enabled() {
+		bad("auth.allowed_origins needs auth.jwt: the dev stub keeps /ws same-origin")
+	}
+	for _, p := range c.Auth.AllowedOrigins {
+		if _, err := path.Match(p, ""); err != nil {
+			bad("auth.allowed_origins %q: %v", p, err)
+		}
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("config: %w", errors.Join(errs...))
 	}
@@ -290,6 +309,7 @@ func (c Config) Redacted() Config {
 		c.Scylla.Password = "xxxxx"
 	}
 	c.Scylla.Hosts = append([]string(nil), c.Scylla.Hosts...)
+	c.Auth.AllowedOrigins = append([]string(nil), c.Auth.AllowedOrigins...)
 	return c
 }
 

@@ -68,7 +68,11 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 			devRooms = httpapi.NewDevRooms(a, roomAdmin{svc: svc}, log)
 			log.Warn("client auth is the dev stub: any claimed identity is trusted")
 		} else {
-			log.Info("client auth is JWT", "issuer", cfg.Auth.JWT.Issuer, "audience", cfg.Auth.JWT.Audience)
+			// Config validation allows origins only with JWT (S-43).
+			mgr.OriginPatterns = cfg.Auth.AllowedOrigins
+			devices.AllowedOrigins = cfg.Auth.AllowedOrigins // S-50
+			log.Info("client auth is JWT", "issuer", cfg.Auth.JWT.Issuer, "audience", cfg.Auth.JWT.Audience,
+				"allowed_origins", cfg.Auth.AllowedOrigins)
 		}
 	} else {
 		log.Warn("no client authenticator for this env (set auth.jwt); /ws and the prekey bundle API are not served", "env", cfg.Env)
