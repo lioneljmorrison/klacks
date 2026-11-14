@@ -8,16 +8,26 @@ is the full table.
 
 ## Summary
 
-| Machine | Sustainable rate, stock settings | Bottleneck | Best tuning measured | Rate sustained with it |
-|---|---|---|---|---|
-| M4 (Apple M4, databases in a 4-CPU colima VM) | **4,000 msg/s** (36k deliveries/s) | PostgreSQL time per publish inside the room lock | S-48 + `synchronous_commit=off` | **≥ 5,000 msg/s** (p99 66 ms) |
-| WSL (Ryzen 9 9900X, 24 threads) | **2,000 msg/s** | Commit flush (WAL fsync) on WSL's virtual disk | `synchronous_commit=off` | **≥ 4,000 msg/s** (p99 31 ms; 22 ms with S-48) |
-| lab-hermes (i3-6100T, 4 threads, 7 GB) | **~500 msg/s** | CPU: four threads shared by server, both databases and the generator | S-48 | 600 msg/s, still near the limit |
+All runs use 10,000 connections (1,000 rooms × 10 members). A run *passes*
+when delivery p99 is under 200 ms with no seq gaps, error frames or lost
+deliveries. Each column below follows one rule: **"every repeat passed up
+to"** is the highest rate at which every repeat of that point passed, and
+**"failed every repeat from"** is the lowest rate at which none did.
 
-*Sustainable* means every repeat passed the gate at 10,000 connections
-(1,000 rooms × 10 members): p99 delivery under 200 ms, no seq gaps, no error
-frames and no lost deliveries. The plan's G-8 target (1,000 msg/s) passes on
-M4 and WSL with stock settings, but not on lab-hermes.
+| Machine | Every repeat passed up to | Failed every repeat from | Likely bottleneck | Best tuning measured |
+|---|---|---|---|---|
+| M4 (Apple M4, databases in a 4-CPU colima VM) | **4,000 msg/s** (6/6) | 5,000 | PostgreSQL work inside the room lock | S-48 + `synchronous_commit=off`: **5,000 msg/s** passed 3/3 (p99 66 ms) |
+| WSL (Ryzen 9 9900X, 24 threads) | **2,000 msg/s** (3/3)¹ | 2,500 | Commit flush (WAL fsync) on WSL's virtual disk | `synchronous_commit=off`: **4,000 msg/s** passed 3/3 (p99 31 ms; 22 ms with S-48) |
+| lab-hermes (i3-6100T, 4 threads, 7 GB) | **300 msg/s** (4/4)² | 700 | Probably CPU (not measured directly) | S-48: 600 msg/s passed 3/3, against 2/3 for base |
+
+¹ WSL also failed one repeat each at 1,000 and 1,500 msg/s, which shows
+how noisy that host's tail is (see Limitations).
+² lab-hermes is a soft limit: 400/s passed 2/3, 500/s 5/6 and 600/s 3/6.
+Even 100/s failed 2/3, once on a cold first run and once on a single spike.
+
+**G-8 (1,000 msg/s, p99 < 200 ms) is met reliably only on M4** (4/4).
+WSL meets it intermittently: 2 of 4 repeats passed, and the history-loading
+run for the cold-resume test also failed it. lab-hermes doesn't meet it.
 
 What the data says, in short:
 
@@ -32,13 +42,18 @@ What the data says, in short:
 - **The cost is PostgreSQL, not ScyllaDB.** ScyllaDB insert p50 was ≤ 2 ms
   on every passing run on every machine. The room lock hold (seven Postgres
   round trips plus a commit) is what grows.
-- **Which fix helps depends on the machine.** On a fast CPU with a slow disk
-  flush (WSL), `synchronous_commit=off` doubled capacity and S-48 did nothing.
-  On a fast CPU with a fast disk (M4), S-48 cut p99 at 4,000/s from 96 ms to
-  28 ms. On a slow CPU (lab-hermes), neither moved it much.
-- **Pool size matters only near the limit, and 60 is about right.** 30
-  collapsed M4 and WSL at their working rates. 90 bought a little on M4 and
-  made WSL worse.
+- **Which fix helps depends on the machine.**
+  - On WSL, the fast CPU with a slow disk flush: `synchronous_commit=off`
+    doubled capacity, and S-48 alone did nothing.
+  - On M4, the fast CPU with a fast disk: S-48 cut p99 at 4,000/s from
+    97 ms to 28 ms, measured against interleaved baseline runs.
+  - On lab-hermes: S-48 and async commit improved p50 but not p99 in a way
+    the noise allows us to claim.
+- **Pool size matters only near the limit.** 30 collapsed M4 and WSL at
+  their working rates. 90 improved M4's p99 at 4,000/s (97 → 67 ms) and
+  improved WSL's delivery at 2,500/s (p99 4.1 s → 0.9 s), though WSL still
+  failed there. A pool can only help if the disk can absorb the extra
+  concurrent commits.
 
 ## Method
 
@@ -60,7 +75,12 @@ a fresh server. The databases persist across a machine's whole sweep.
   min–max range**, never the best run.
 - **Repeats interleave.** Rate sweeps go up, down, then up again. A/B
   comparisons run A, B, C, A, B, C…, never AAA BBB, so drift and other
-  load on the host spread across all the variants.
+  load on the host spread across all the variants. **Every tuning
+  comparison below uses only the baseline runs interleaved with its
+  variants.** Earlier baseline runs at the same rate appear in the
+  rate-sweep tables, not in the comparisons.
+- **A difference counts as an effect only when the min–max ranges don't
+  overlap.**
 - **Drift checks.** Each sweep re-ran an early point at the end. M4 was
   identical (1,000/s: p99 6.0 ms at 17:24 and at 18:03). lab-hermes was no
   worse (300/s: 74 → 24 ms). WSL was not stable: see Limitations.
@@ -150,7 +170,8 @@ passed every repeat.
 | 1,000 | 0/3 | *overloaded* | | 5,687 | | ≤ 64 / ≤ 128 | 60 |
 
 lab-hermes's limit is soft. Its p99 climbs steadily from 300/s, and the
-200 ms line falls at about 600/s. The 100/s failures are its first run
+200 ms line falls at about 600/s; 300/s is the highest rate that passed
+every repeat. The 100/s failures are its first run
 (cold caches) and one later run with a single latency spike. Every rate
 from 200 to 500 has runs with a p99 well under 100 ms. Its lock-hold p99
 is ≤ 64–128 ms at *every* rate, a sign that the box stalls now and then
@@ -167,9 +188,11 @@ findings). Two numbers decide whether publishes queue:
   4,000/s, with a lock hold of 8–16 ms, that is 32–64 connections busy. The
   pool's 60 is at the edge, the pool peaked at 60, and 5,000/s tipped it
   over. On WSL, commit flushes are slower and spikier, so the same pool
-  fills at a lower rate. lab-hermes's hold is 8–16 ms at 500/s, but the CPU
-  that has to run those transactions is also busy with 10k sockets, two
-  databases and the generator.
+  fills at a lower rate. lab-hermes's hold is 8–16 ms at 500/s, yet its
+  pool fills anyway. The likely cause is that its four threads also carry
+  10k sockets, two databases and the generator. CPU and memory weren't
+  recorded, though, and the box had only about 2 GB of RAM free, so
+  memory pressure isn't ruled out.
 - **Once the arrival rate exceeds what the pool drains, the queue grows
   without bound.** That is why overloaded runs show p50s of seconds and,
   past the limit, p99 that just measures how long the run lasted (60 s of
@@ -190,69 +213,92 @@ in ms.
 
 ### Near the stock limit
 
+Baselines here are only the runs interleaved with each variant.
+
 | Machine @ rate | Setting | Pass | p50 | p95 | p99 | Lock p50 |
 |---|---|---|---|---|---|---|
-| M4 @ 4,000 | base, pool 60 | 6/6 | 20.8 | 80.1 | 95.8 (43.7–156) | ≤ 16 |
-| | **S-48** | 3/3 | 7.5 | 14.5 | **27.7 (27.6–28.6)** | ≤ 8 |
-| | `synchronous_commit=off` | 3/3 | 12.1 | 35.9 | 67.0 (57.4–85.4) | ≤ 8 |
-| | pool 90 | 3/3 | 17.1 | 35.3 | 66.6 (65.4–71.9) | ≤ 16 |
+| M4 @ 4,000 | base, pool 60 | 3/3 | 21.2 (20.4–67.3) | | 97.0 (84.9–156) | ≤ 16 |
+| | **S-48** | 3/3 | **7.5 (7.4–7.6)** | 14.5 | **27.7 (27.6–28.6)** | ≤ 8 |
+| | `synchronous_commit=off` | 3/3 | **12.1 (11.8–12.2)** | 35.9 | 67.0 (57.4–85.4) | ≤ 8 |
+| | pool 90 | 3/3 | 17.1 (16.6–17.4) | 35.3 | **66.6 (65.4–71.9)** | ≤ 16 |
 | | pool 30 | 0/3 | *overloaded* | | 5,896 | ≤ 8 |
 | WSL @ 2,500 | base, pool 60 | 0/3 | *overloaded* | | 4,078 (1,616–7,420) | ≤ 16 |
-| | **`synchronous_commit=off`** | 3/3 | 6.0 | 9.9 | **16.5 (16.2–16.9)** | ≤ 4 |
+| | **`synchronous_commit=off`** | **3/3** | 6.0 | 9.9 | **16.5 (16.2–16.9)** | ≤ 4 |
 | | S-48 | 0/3 | *overloaded* | | 5,094 | ≤ 16 |
-| | pool 90 | 0/3 | 18.3 | 487 | 884 (352–1,639) | ≤ 16 |
+| | pool 90 | 0/3 | 18.3 (14.8–55.0) | 487 | 884 (352–1,639) | ≤ 16 |
 | | pool 30 | 0/3 | *overloaded* | | 7,196 | ≤ 16 |
-| lab-hermes @ 500 | base, pool 60 | 5/6 | 8.8 | 60.5 | 105 (68.9–395) | ≤ 16 |
-| | S-48 | 3/3 | 5.7 | 42.7 | 81.5 (49.5–104) | ≤ 8–16 |
-| | `synchronous_commit=off` | 3/3 | 4.4 | 35.4 | 120 (76.4–145) | ≤ 8 |
-| | pool 90 | 2/3 | 6.7 | 47.9 | 72.3 (43.3–287) | ≤ 16 |
-| | pool 30 | 2/3 | 7.3 | 40.5 | 149 (61.6–234) | ≤ 8–16 |
-| lab-hermes @ 200 | base | 6/6 | 6.0 | 14.3 | 24.0 (19.4–118) | ≤ 16 |
-| | `synchronous_commit=off` | 3/3 | 4.3 | 9.9 | 15.6 (14.9–20.7) | ≤ 8 |
+| lab-hermes @ 500 | base, pool 60 | 2/3 | 7.2 (6.5–7.9) | | 85.5 (68.9–395) | ≤ 16 |
+| | S-48 | 3/3 | **5.7 (5.2–6.0)** | 42.7 | 81.5 (49.5–104) | ≤ 8–16 |
+| | `synchronous_commit=off` | 3/3 | **4.4 (4.0–5.1)** | 35.4 | 120 (76.4–145) | ≤ 8 |
+| | pool 90 | 2/3 | 6.7 (5.9–7.7) | 47.9 | 72.3 (43.3–287) | ≤ 16 |
+| | pool 30 | 2/3 | 7.3 (5.4–7.4) | 40.5 | 149 (61.6–234) | ≤ 8–16 |
+| lab-hermes @ 200 | base | 3/3 | 5.3 (5.0–5.9) | | 20.3 (19.4–21.8) | ≤ 16 |
+| | `synchronous_commit=off` | 3/3 | **4.3 (4.2–4.6)** | 9.9 | 15.6 (14.9–20.7) | ≤ 8 |
+
+**Bold** marks a difference from the baseline whose range doesn't overlap.
 
 ### Does the limit move?
 
 | Machine @ rate | Setting | Pass | p50 | p95 | p99 |
 |---|---|---|---|---|---|
-| M4 @ 5,000 | base | 0/6 | *overloaded* | | 8,513 |
+| M4 @ 5,000 | base | 0/3 | *overloaded* | | 8,581 |
 | | `synchronous_commit=off` | 0/3 | *overloaded* | | 6,894 |
 | | S-48 | 0/3 | 410 | 834 | 857 (276–956) |
 | | **S-48 + `synchronous_commit=off`** | **3/3** | 12.5 | 54.0 | **66.0 (65.7–89.3)** |
-| WSL @ 3,000 | base | 0/3 | 16.8 | 296 | 415 (275–1,515) |
+| WSL @ 3,000 | base (pass 1) | 0/3 | 16.8 | 296 | 415 (275–1,515) |
 | | **`synchronous_commit=off`** | **3/3** | 7.7 | 15.2 | **30.0 (19.6–30.5)** |
 | WSL @ 4,000 | `synchronous_commit=off` | 3/3 | 9.7 | 18.5 | 31.5 (27.4–36.8) |
 | | S-48 + `synchronous_commit=off` | 3/3 | 6.3 | 11.9 | 21.6 (20.0–26.6) |
-| lab-hermes @ 600 | base | 3/6 | 10.0 | 76.6 | 193 (100–200) |
-| | S-48 | 3/3 | 6.8 | 52.1 | 121 (67.7–197) |
-| | S-48 + `synchronous_commit=off` | 3/3 | 5.0 | 46.9 | 115 (82.8–128) |
+| lab-hermes @ 600 | base | 2/3 | 10.0 (9.4–11.9) | | 186 (100–200) |
+| | S-48 | 3/3 | **6.8 (6.5–7.1)** | 52.1 | 121 (67.7–197) |
+| | S-48 + `synchronous_commit=off` | 3/3 | **5.0 (4.2–5.8)** | 46.9 | 115 (82.8–128) |
+
+WSL's 3,000/s baseline is from pass 1, not interleaved with the sync-off
+runs. The gap (0/3 against 3/3, p99 ranges far apart) is large enough that
+this doesn't change the reading.
 
 ### Reading the results
 
-- **S-48 (5 round trips instead of 7)** is a clear win on M4. At 4,000/s
-  its p99 range (27.6–28.6 ms) sits entirely below base's (43.7–156 ms), and
-  the lock hold drops a bucket. S-48's own PR, on a single noisy host,
-  couldn't establish a load-level improvement; interleaved repeats on a
-  quiet machine can. On WSL at 2,500/s it does nothing, because the
-  commit flush dominates there. With the flush removed (sync off, 4,000/s)
-  it helps again: 21.6 vs 31.5 ms, ranges just apart. On lab-hermes it
-  turns 600/s from 3/6 into 3/3, but the p99 ranges overlap, so the effect
-  there is small and uncertain. **Recommendation: merge S-48.** It never
-  hurt, and where round trips dominate it buys a lot.
+- **S-48 (5 round trips instead of 7) is a clear win on M4.** At 4,000/s,
+  against interleaved baseline runs, its p50 (7.4–7.6 ms) and p99
+  (27.6–28.6 ms) ranges both sit entirely below base's (20.4–67.3 and
+  84.9–156 ms), and the lock hold drops a bucket. S-48's own PR, on a
+  single noisy host, couldn't establish a load-level improvement;
+  interleaved repeats on a quiet machine can.
+  - **WSL at 2,500/s:** it does nothing, because the commit flush dominates.
+  - **WSL with the flush removed** (sync off, 4,000/s): it helps again,
+    21.6 vs 31.5 ms, with ranges just apart.
+  - **lab-hermes:** it lowers p50 at 500/s and 600/s, with non-overlapping
+    ranges, and turns 600/s from 2/3 into 3/3 passes. Its p99 ranges
+    overlap base's, so the tail effect there is unproven.
+
+  It never made anything worse. **Merging S-48 is supported by this data.**
 - **`synchronous_commit=off`** removes the wait for the WAL flush at
-  COMMIT. On WSL that flush is the bottleneck. Turning it off doubled the
-  sustainable rate and cut p99 at 2,500/s from seconds to 16.5 ms. On M4
-  it helps alone (p99 96 → 67 ms at 4,000/s), and combined with S-48 it is
-  what carries 5,000/s. On lab-hermes it helps at low rates (p99 24 → 16 ms
-  at 200/s) but not at 500/s, where the CPU is the limit. **This is a
-  durability trade-off, not a free speed-up.** See below.
-- **Pool size** only matters near saturation. 30 connections were too few
-  for M4 at 4,000/s and WSL at 2,500/s, and both collapsed. 90 helped M4 a
-  little (p99 96 → 67 ms) but made WSL worse (884 ms vs overloaded at 60:
-  more concurrent commits contending for the same slow flush). On
-  lab-hermes neither 30 nor 90 was distinguishable from 60. The sizing rule
-  in [operations.md](operations.md) (`pool_max_conns` ≥ peak publishes/s ×
-  p99 lock hold, with headroom) holds, but a bigger pool can't fix a slow
-  disk.
+  COMMIT.
+  - **WSL:** that flush is the bottleneck. Turning it off doubled the rate
+    that passed every repeat, and cut p99 at 2,500/s from seconds to
+    16.5 ms.
+  - **M4 at 4,000/s:** it alone lowers p50 (non-overlapping ranges), but
+    its p99 range overlaps base's. Combined with S-48 it is what carries
+    5,000/s.
+  - **lab-hermes:** it lowers p50 at 200/s and 500/s, but not p99 in a way
+    the ranges support.
+
+  **This is a durability trade-off, not a free speed-up.** See below.
+- **Pool size** matters only near saturation.
+  - **30 connections** were too few for M4 at 4,000/s and WSL at 2,500/s,
+    and both collapsed into backlog.
+  - **90 connections on M4** improved p99 at 4,000/s (65.4–71.9 against
+    84.9–156 ms).
+  - **90 connections on WSL** at 2,500/s turned a multi-second backlog into
+    a p99 of about 0.9 s. That still fails the gate, and the lock-hold tail
+    grew a bucket (≤ 256 vs ≤ 128 ms): more commits waiting on the same
+    slow flush.
+  - **lab-hermes:** neither 30 nor 90 was distinguishable from 60.
+
+  The sizing rule in [operations.md](operations.md) (`pool_max_conns` ≥
+  peak publishes/s × p99 lock hold, with headroom) holds, but on a slow
+  disk a bigger pool only postpones the limit.
 
 ### What `synchronous_commit=off` risks
 
@@ -274,6 +320,11 @@ before restarting**, as after a restore
 A clean shutdown loses nothing. Weigh that procedure against the capacity
 it buys; on hardware like M4's, S-48 alone already gives most of the
 latency gain.
+
+This procedure was **not tested here**. No crash was induced. It follows
+from `klacks reconcile`'s documented restore case
+(`TestReconcileAfterPostgresRewind` covers a rewound PostgreSQL), and the
+crash case should get its own test before anyone relies on it.
 
 ## Cold resume
 
@@ -297,16 +348,19 @@ machines.
   limit is publishes per second through PostgreSQL.
 - **Rough capacities (one node, everything on one box):**
   - **Laptop-class modern CPU with a fast SSD (M4):** about 4,000 msg/s
-    stock; over 5,000 with S-48 and async commit.
-  - **Desktop CPU on a slow-flush disk (WSL here):** about 2,000 msg/s
-    stock; about 4,000 with async commit.
-  - **Old 2-core box:** a few hundred msg/s, plenty for a small community.
+    stock; at least 5,000 with S-48 and async commit.
+  - **Desktop CPU on a slow-flush disk (WSL here):** up to about 2,000 msg/s
+    stock, but with an unreliable tail even at 1,000; about 4,000 with
+    async commit.
+  - **Old 2-core box (lab-hermes):** about 300 msg/s reliably, a soft limit
+    near 500. Plenty for a small community.
 - **Check the disk's flush latency before tuning anything else.** If the
   lock hold is high while the CPU is idle, the commit flush is the
   bottleneck. Faster storage, or `synchronous_commit=off` with its
   reconcile procedure, is the lever; a bigger pool is not.
 - **Keep the pool near 60 for a few thousand msg/s.** Too small collapses
-  the server at load, and much bigger can hurt on slow disks. Watch
+  the server at load. Bigger (90) helped on M4. On a slow-flush disk it
+  only softened the overload and lengthened lock waits. Watch
   `klacks_pg_pool_acquired_conns`: pinned at the maximum means you're at
   the limit.
 - **Watch for the limit, not just p99.** Past it, latency goes from
