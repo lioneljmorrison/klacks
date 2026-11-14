@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/lioneljmorrison/klacks/internal/auth"
 	"github.com/lioneljmorrison/klacks/internal/protocol"
+	"github.com/lioneljmorrison/klacks/internal/ratelimit"
 	"github.com/lioneljmorrison/klacks/internal/store"
 )
 
@@ -70,6 +72,12 @@ type Manager struct {
 	// is nil, every valid frame is answered with a "not implemented yet"
 	// error (unit tests, and the endpoint before S-13).
 	Chat Chat
+
+	// PublishPerUser and ConnectPerUser are the per-user limits on publish
+	// frames and connection attempts (S-32). Nil is unlimited. Set them
+	// before serving.
+	PublishPerUser *ratelimit.Keyed
+	ConnectPerUser *ratelimit.Keyed
 
 	auth auth.Authenticator
 	log  *slog.Logger
@@ -129,6 +137,11 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id, err := m.auth.Authenticate(r)
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if !m.ConnectPerUser.Allow(id.UserID) {
+		w.Header().Set("Retry-After", strconv.Itoa(m.ConnectPerUser.RetryAfter()))
+		http.Error(w, "too many connection attempts", http.StatusTooManyRequests)
 		return
 	}
 	m.mu.Lock()

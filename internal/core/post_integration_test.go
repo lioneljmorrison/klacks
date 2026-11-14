@@ -262,3 +262,40 @@ func TestPostMessageSizeCap(t *testing.T) {
 		t.Fatalf("watermark = %d, want 1", hi)
 	}
 }
+
+// TestPostMessageRoomRateLimit: the room limit (S-32) is charged only after
+// the sender is authorized, so a non-member cannot spend a room's budget,
+// and a refused publish leaves the watermark alone.
+func TestPostMessageRoomRateLimit(t *testing.T) {
+	e := newEnv(t, nil)
+	ctx := context.Background()
+	room := groupRoom(t, e.svc)
+	outsider := id(0xc4)
+	budget := 2
+	var charged []store.UUID
+	e.svc.AllowRoomPost = func(r store.UUID) bool {
+		charged = append(charged, r)
+		budget--
+		return budget >= 0
+	}
+
+	for range 5 {
+		if _, err := e.svc.PostMessage(ctx, room, outsider, payload(1)); !errors.Is(err, core.ErrNotMember) {
+			t.Fatalf("outsider: err = %v; want ErrNotMember", err)
+		}
+	}
+	if len(charged) != 0 {
+		t.Fatalf("non-member publishes charged the room %d times", len(charged))
+	}
+	for i := 1; i <= 2; i++ {
+		if _, err := e.svc.PostMessage(ctx, room, owner, payload(i)); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+	if _, err := e.svc.PostMessage(ctx, room, owner, payload(3)); !errors.Is(err, core.ErrRateLimited) {
+		t.Fatalf("over budget: err = %v; want ErrRateLimited", err)
+	}
+	if hi := e.hi(t, room); hi != 2 {
+		t.Fatalf("watermark = %d; want 2", hi)
+	}
+}

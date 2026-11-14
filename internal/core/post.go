@@ -17,6 +17,10 @@ const MaxPayloadSize = 64 << 10
 
 var ErrPayloadTooLarge = errors.New("payload too large")
 
+// ErrRateLimited means a rate limit refused the request (S-32); the caller
+// may retry later.
+var ErrRateLimited = errors.New("rate limited")
+
 // Payload is a message as the sender submits it. The server never sees
 // plaintext: Ciphertext and Header are opaque. The client generates
 // MessageID. DeviceID is the sender's device; it is not checked yet.
@@ -60,6 +64,9 @@ func (s *Service) PostMessage(ctx context.Context, room, sender store.UUID, p Pa
 		}
 		if err := authorize(request{actor: role, action: actPost}); err != nil {
 			return fmt.Errorf("post message: %w", err)
+		}
+		if s.AllowRoomPost != nil && !s.AllowRoomPost(room) {
+			return fmt.Errorf("post message: room: %w", ErrRateLimited)
 		}
 		ts, err := l.WriteTS(ctx)
 		if err != nil {

@@ -13,6 +13,7 @@ import (
 	"github.com/lioneljmorrison/klacks/internal/auth"
 	"github.com/lioneljmorrison/klacks/internal/config"
 	"github.com/lioneljmorrison/klacks/internal/core"
+	"github.com/lioneljmorrison/klacks/internal/ratelimit"
 	"github.com/lioneljmorrison/klacks/internal/store"
 )
 
@@ -55,6 +56,7 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		// Fan-out goes through the manager: after each commit the core
 		// hands the message to the hub (S-13).
 		svc := core.New(rooms, messages, mgr.Deliver, mgr.MemberRemoved)
+		applyRateLimits(cfg.RateLimit, svc, mgr)
 		mgr.Chat = svc
 		wsHandler = mgr
 		// The dev room endpoints shim core's room management over REST,
@@ -148,4 +150,15 @@ func clientAuthenticator(env string) auth.Authenticator {
 		return auth.Dev{}
 	}
 	return nil
+}
+
+// applyRateLimits installs the configured limits (S-32): per user on publish
+// frames and connection attempts at the WebSocket, per room in the core
+// after the sender's membership check. An off limit installs nothing.
+func applyRateLimits(rl config.RateLimit, svc *core.Service, mgr *ws.Manager) {
+	mgr.PublishPerUser = ratelimit.New(rl.PublishUser)
+	mgr.ConnectPerUser = ratelimit.New(rl.ConnectUser)
+	if room := ratelimit.New(rl.PublishRoom); room != nil {
+		svc.AllowRoomPost = func(id store.UUID) bool { return room.Allow(id) }
+	}
 }

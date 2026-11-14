@@ -205,6 +205,7 @@ func TestErrorFor(t *testing.T) {
 		{ErrUnknownType, CodeUnknownType},
 		{fmt.Errorf("post: %w", core.ErrPayloadTooLarge), CodePayloadTooLarge},
 		{fmt.Errorf("post: %w", core.ErrNotMember), CodeNotMember},
+		{fmt.Errorf("post: room: %w", core.ErrRateLimited), CodeRateLimited},
 		{core.ErrForbidden, CodeForbidden},
 		{core.ErrRoomNotFound, CodeRoomNotFound},
 		{core.ErrInvalidArgument, CodeInvalidArgument},
