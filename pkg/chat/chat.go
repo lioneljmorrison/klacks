@@ -75,7 +75,10 @@ type Config struct {
 	// idle_in_transaction_session_timeout. It must be longer than
 	// ScyllaTimeout (a publish holds the lock across its ScyllaDB write);
 	// Open fails otherwise. 0 disables all three timeouts, which releases a
-	// lock only when its transaction ends — use knowingly.
+	// lock only when its transaction ends — use knowingly. It is also the
+	// client-side deadline of each device/prekey call and each room call
+	// that takes no lock, so a partitioned PostgreSQL fails them instead of
+	// hanging them; 0 disables that too.
 	RoomLockTimeout time.Duration
 
 	// Actor is the embedder's service identity (see the package comment):
@@ -164,7 +167,7 @@ func Open(ctx context.Context, cfg Config) (*Service, error) {
 		cfg:     cfg,
 		log:     log,
 		pool:    pool,
-		devices: store.NewDevices(pool),
+		devices: store.NewDevices(pool, cfg.RoomLockTimeout),
 		hub:     make(map[[16]byte]map[*subscription]struct{}),
 	}
 	var onRemoved func(context.Context, core.MemberRemoved)
