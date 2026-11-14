@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 import { hex, hexBytes, unbase64, x25519Public } from "../web/js/keys.mjs";
-import { Ratchet, newInitiatorRatchet, newResponderRatchet, decodeHeader } from "../web/js/ratchet.mjs";
+import { Ratchet, newInitiatorRatchet, newResponderRatchet, decodeHeader, encodeHeader, encodePrekeyHeader } from "../web/js/ratchet.mjs";
 
 const vectors = JSON.parse(
   await readFile(path.join(path.dirname(fileURLToPath(import.meta.url)), "testdata/vectors.json"), "utf8")
@@ -134,4 +134,24 @@ test("ratchet headers decode to the recorded fields", () => {
   assert.equal(h2.pre, null);
   assert.deepEqual(h2.recipient, deviceA);
   assert.deepEqual(h2.device, deviceB);
+});
+
+// Headers parse only at their exact encoded length (S-35), matching the Go
+// reference's decodeHeader: truncated or padded headers are refused.
+test("decodeHeader accepts only the exact length", () => {
+  const dh = new Uint8Array(32).fill(7);
+  const id = (v) => new Uint8Array(16).fill(v);
+  const normal = encodeHeader(dh, 3, 9, id(1), id(2));
+  const prekey = encodePrekeyHeader(
+    { identityEd: dh, identityDH: dh, ephemeral: dh, signedPrekeyID: 5, oneTimePrekeyID: 6 },
+    dh, 0, 0, id(1), id(2)
+  );
+  for (const h of [normal, prekey]) {
+    assert.ok(decodeHeader(h));
+    assert.throws(() => decodeHeader(h.slice(0, h.length - 8)));
+    assert.throws(() => decodeHeader(h.slice(0, h.length - 1)));
+    const padded = new Uint8Array(h.length + 1);
+    padded.set(h);
+    assert.throws(() => decodeHeader(padded));
+  }
 });

@@ -10,7 +10,7 @@ type peerKeys struct {
 	opkNext int
 }
 
-func newPeerKeys(t *testing.T, opkCount int) *peerKeys {
+func newPeerKeys(t testing.TB, opkCount int) *peerKeys {
 	t.Helper()
 	id, err := NewIdentity()
 	if err != nil {
@@ -29,7 +29,7 @@ func newPeerKeys(t *testing.T, opkCount int) *peerKeys {
 
 // bundle returns the owner's fetched bundle: public halves only. takeOpk
 // offers the next one-time prekey, as the server would hand one out.
-func (p *peerKeys) bundle(t *testing.T, takeOpk bool) Bundle {
+func (p *peerKeys) bundle(t testing.TB, takeOpk bool) Bundle {
 	t.Helper()
 	dhPub, err := p.id.DHPublic()
 	if err != nil {
