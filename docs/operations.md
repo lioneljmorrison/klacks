@@ -176,8 +176,8 @@ expected behavior, not drilled.
 
 | Store down | Publish | Resume / subscribe | `/readyz` |
 |---|---|---|---|
-| ScyllaDB | Fails with an error frame (code `internal` today, S-46); the transaction rolls back, `next_seq` does not move, nothing is delivered. | Error frame. | `503`, `scylla: unavailable` |
-| PostgreSQL refusing connections | Fails with an error frame; nothing committed. | Error frame. | `503`, `postgres: unavailable` |
+| ScyllaDB | Fails with an error frame, code `unavailable` (S-46); the transaction rolls back, `next_seq` does not move, nothing is delivered. | Error frame. | `503`, `scylla: unavailable` |
+| PostgreSQL refusing connections | Fails with an error frame, code `unavailable`; nothing committed. | Error frame, `unavailable`. | `503`, `postgres: unavailable` |
 | PostgreSQL partitioned (no answer) | **Hangs** until the client disconnects; nothing commits (S-47 adds a deadline). | May hang likewise. | `503` within `KLACKS_HTTP_READY_TIMEOUT` |
 
 Recovery is automatic: once the store answers, `/readyz` returns `200` and

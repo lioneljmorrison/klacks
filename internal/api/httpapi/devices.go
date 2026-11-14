@@ -266,14 +266,18 @@ type errorResponse struct {
 	Message string `json:"message"`
 }
 
-// writeError maps a store error to its REST status. Unexpected errors are
-// logged, not sent.
+// writeError maps a store error to its REST status. Outages are a 503;
+// unexpected errors are logged, not sent.
 func (d *Devices) writeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrInvalidBundle):
 		writeJSON(w, http.StatusBadRequest, errorResponse{Code: "invalid_bundle", Message: err.Error()})
 	case errors.Is(err, store.ErrDeviceNotFound):
 		writeJSON(w, http.StatusNotFound, errorResponse{Code: "device_not_found", Message: "device not found"})
+	case store.Unavailable(err):
+		// A store outage or timeout (S-46): the client may retry.
+		d.log.Warn("devices: store unavailable", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Code: "unavailable", Message: "store unavailable; retry"})
 	default:
 		d.log.Error("devices: request failed", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Code: "internal", Message: "internal error"})

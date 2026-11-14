@@ -516,5 +516,13 @@ func (m *Manager) replyError(c *Conn, err error, f protocol.Frame, log *slog.Log
 	e := protocol.ErrorFor(err)
 	setRefs(e, f)
 	m.enqueue(c, e)
-	log.Debug("ws request failed", "code", e.Code, "err", err)
+	// The client gets no detail for these two, so the log must carry it.
+	switch e.Code {
+	case protocol.CodeInternal:
+		log.Error("ws request failed", "code", e.Code, "err", err)
+	case protocol.CodeUnavailable:
+		log.Warn("ws request failed: store unavailable", "code", e.Code, "err", err)
+	default:
+		log.Debug("ws request failed", "code", e.Code, "err", err)
+	}
 }
