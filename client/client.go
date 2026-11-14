@@ -63,11 +63,15 @@ type Client struct {
 	// The view is what rotation redistributes to.
 	roomPeers map[[16]byte][]Peer
 
-	// The WebSocket connection and its read loop.
+	// The WebSocket connection and its read loop, replaced under mu by
+	// each Dial. A read loop gets its connection and context as arguments
+	// and never reads these fields, so a loop that outlives its connection
+	// (it was mid-delivery when Disconnect ran) cannot follow a redial onto
+	// the new one. readers counts every running loop, for Close.
 	conn       *websocket.Conn
-	readCtx    context.Context
 	readCancel context.CancelFunc
-	readerDone chan struct{} // closed when the read loop exits
+	readerDone chan struct{} // closed when the current connection's read loop exits
+	readers    sync.WaitGroup
 	log        *slog.Logger
 
 	// Inbox receives one event per delivered message, decrypted or with
@@ -143,27 +147,26 @@ func newClientWithKeys(base string, user, device [16]byte, id IdentityKey, spk S
 		return nil, errors.New("client: signed prekey id must be >= 1")
 	}
 	c := &Client{
-		base:       strings.TrimSuffix(base, "/"),
-		user:       user,
-		device:     device,
-		id:         id,
-		spk:        spk,
-		opkNext:    1,
-		opkPrivs:   make(map[int64]OneTimePrekey, len(opks)),
-		sessions:   make(map[sessionKey]*session),
-		rooms:      make(map[[16]byte]*roomState),
-		pending:    make(map[sessionKey][]deliver),
-		fallbacks:  make(map[fallbackKey]*session),
-		skOwn:      make(map[[16]byte]*SenderChain),
-		skPeers:    make(map[skRef]*SenderKeys),
-		skPending:  make(map[skRef][]deliver),
-		roomPeers:  make(map[[16]byte][]Peer),
-		httpc:      &http.Client{},
-		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Inbox:      make(chan Received, 1024),
-		Errs:       make(chan error, 64),
-		done:       make(chan struct{}),
-		readerDone: make(chan struct{}),
+		base:      strings.TrimSuffix(base, "/"),
+		user:      user,
+		device:    device,
+		id:        id,
+		spk:       spk,
+		opkNext:   1,
+		opkPrivs:  make(map[int64]OneTimePrekey, len(opks)),
+		sessions:  make(map[sessionKey]*session),
+		rooms:     make(map[[16]byte]*roomState),
+		pending:   make(map[sessionKey][]deliver),
+		fallbacks: make(map[fallbackKey]*session),
+		skOwn:     make(map[[16]byte]*SenderChain),
+		skPeers:   make(map[skRef]*SenderKeys),
+		skPending: make(map[skRef][]deliver),
+		roomPeers: make(map[[16]byte][]Peer),
+		httpc:     &http.Client{},
+		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Inbox:     make(chan Received, 1024),
+		Errs:      make(chan error, 64),
+		done:      make(chan struct{}),
 	}
 	if err := c.AddOneTimePrekeys(opks); err != nil {
 		return nil, err
