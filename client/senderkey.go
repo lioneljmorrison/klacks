@@ -586,3 +586,55 @@ func (c *Client) sealGroup(room [16]byte, plaintext []byte) (encryptResult, erro
 	}
 	return encryptResult{MessageID: mid, Header: header, Ciphertext: ciphertext}, nil
 }
+
+// rotateOwn replaces this device's sending chain for the room with a fresh
+// one. Callers redistribute afterwards; receivers keep the old chain
+// decryptable while its late messages arrive.
+func (c *Client) rotateOwn(room [16]byte) error {
+	ch, err := NewSenderChain()
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.skOwn[room] = ch
+	c.mu.Unlock()
+	return nil
+}
+
+// Distribute makes this device's sender key for the room known to every
+// peer device listed, pairwise over their existing Double Ratchet
+// sessions, creating the chain first when there is none (S-27). Peers are
+// every other member device of the room.
+func (c *Client) Distribute(ctx context.Context, room [16]byte, peers []Peer) error {
+	for _, p := range peers {
+		e, err := c.sealDistribution(ctx, room, p)
+		if err != nil {
+			return err
+		}
+		if err := c.publish(ctx, room, e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Rotate replaces this device's sender key for the room with a fresh one
+// and redistributes it to every peer device listed (S-29's rotation, on a
+// membership change).
+func (c *Client) Rotate(ctx context.Context, room [16]byte, peers []Peer) error {
+	if err := c.rotateOwn(room); err != nil {
+		return err
+	}
+	return c.Distribute(ctx, room, peers)
+}
+
+// SendGroup encrypts plaintext once under this device's sender key and
+// publishes it as the room's single broadcast ciphertext (S-28). The key
+// must have been distributed first.
+func (c *Client) SendGroup(ctx context.Context, room [16]byte, plaintext []byte) error {
+	e, err := c.sealGroup(room, plaintext)
+	if err != nil {
+		return err
+	}
+	return c.publish(ctx, room, e)
+}

@@ -237,3 +237,62 @@ one KDF step of the ratchet chain, so a `(key, nonce)` pair can never
 repeat. Any change to the envelope requires a code review that states its
 `(key, nonce)`-reuse and associated-data consequences (the gate comment on
 `client/envelope.go`).
+
+### Sender Keys (S-27, S-28)
+
+Groups follow Signal's Sender Key scheme (libsignal's `SenderChainKey`,
+`SenderMessageKey`, `GroupCipher`): each member device generates one chain
+per room — a random 32-byte chain key at iteration 0, a random 32-bit key
+id, and an Ed25519 signing pair — and distributes it pairwise over the
+existing Double Ratchet sessions. Group messages are then encrypted once
+under the sender's chain and published as a single broadcast ciphertext.
+
+The distribution rides the pairwise transport: it is an ordinary pairwise
+message whose plaintext is
+
+    "skd1"(4) || key id(4) || iteration(4) || chain key(32) || signing key(32)
+
+76 bytes, fixed width. `"skd1"` is the magic tag that distinguishes a
+distribution from application plaintext after the pairwise ratchet opens
+the envelope; an application plaintext beginning with it would be read as
+a distribution. The delivering frame's room, sender and device fields
+place it: receivers install it per (room, sender device). Installing the
+identical payload again is a no-op (redelivery); the same key id with
+different material is refused as a conflict. Each sender device keeps at
+most 4 recent chains installed, so messages from a recent rotation still
+decrypt while they arrive. Group messages that arrive before their
+distribution (publishes can commit out of send order) are stashed per
+sender device — at most 64 — and decrypt when it lands.
+
+The chain ratchets once per message, per libsignal:
+
+    message key seed = HMAC-SHA256(chain key, 0x01)
+    next chain key   = HMAC-SHA256(chain key, 0x02)
+    message key      = HKDF-SHA256(ikm = seed, salt = 0,
+                                   info = "klacks sender key message v1",
+                                   44) → key(32) + nonce(12)
+
+so each chain step draws one (key, nonce) pair and never repeats it.
+
+A group message's publish carries its header in the `header` field:
+
+    version 0x01(1) || type 0x03(1) || key id(4) || iteration(4) ||
+    Ed25519 signature(64)
+
+The AEAD is ChaCha20-Poly1305 — the envelope's primitive, in place of
+libsignal's AES-CBC+HMAC — with associated data `AD || header[:10]`, where
+AD is the fixed-width associated data above with the recipient device
+zero: the broadcast copy binds no single recipient. The Ed25519 signature
+under the chain's signing key covers `header[:10] || ciphertext`: everyone
+in the group holds the sender key, so the signature is what attributes the
+message to the distributing device and keeps other holders from forging
+its messages. Receivers verify the signature, then derive the message key
+at the header's iteration — stashing skipped keys for out-of-order
+arrivals, at most 2000 chain steps ahead (libsignal's GroupCipher limit) —
+and open. Like the Double Ratchet, the step runs on a copy and commits
+only on success, and an identical redelivery returns the original
+plaintext while different content at the same chain position is refused.
+
+Key rotation (S-29) replaces the sender's chain with a fresh key id and
+redistributes; the removed member receives no distribution addressed to
+them.
