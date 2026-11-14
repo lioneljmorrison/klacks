@@ -43,6 +43,12 @@ type Client struct {
 	// the prekey message establishes the session.
 	pending map[sessionKey][]deliver
 
+	// fallbacks are receive-only sessions demoted (or never promoted) by
+	// the initiation tie-break, kept while the messages sent over them
+	// arrive; fallbackOrder tracks insertion for per-peer eviction.
+	fallbacks     map[fallbackKey]*session
+	fallbackOrder []fallbackKey
+
 	// Sender keys (S-27, S-28): this device's sending chain per room, the
 	// installed chains of each peer sender device per room, and the group
 	// messages stashed per sender device while their distribution is in
@@ -147,6 +153,7 @@ func newClientWithKeys(base string, user, device [16]byte, id IdentityKey, spk S
 		sessions:   make(map[sessionKey]*session),
 		rooms:      make(map[[16]byte]*roomState),
 		pending:    make(map[sessionKey][]deliver),
+		fallbacks:  make(map[fallbackKey]*session),
 		skOwn:      make(map[[16]byte]*SenderChain),
 		skPeers:    make(map[skRef]*SenderKeys),
 		skPending:  make(map[skRef][]deliver),

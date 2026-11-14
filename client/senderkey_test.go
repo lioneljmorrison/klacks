@@ -228,6 +228,140 @@ func TestGroupMessageAwaitsDistribution(t *testing.T) {
 	}
 }
 
+// TestGroupMessageAwaitsNextRotation: with an older chain from the same
+// sender device already installed, a message under the sender's NEXT key
+// id — its rotation distribution still in flight — is stashed (not
+// dropped), and drains when the distribution lands. The drop variant of
+// this race is what the e2e removal tests caught.
+func TestGroupMessageAwaitsNextRotation(t *testing.T) {
+	base := restDevices(t)
+	ctx := context.Background()
+	alice, err := NewClient(base, [16]byte{1}, [16]byte{0xA1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := NewClient(base, [16]byte{2}, [16]byte{0xB1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []*Client{alice, bob} {
+		if err := c.Register(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	room := [16]byte{9}
+	peerBob := Peer{User: bob.user, Device: bob.device}
+
+	d1, err := alice.sealDistribution(ctx, room, peerBob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob.handleDeliver(deliverOf(room, 1, alice, d1))
+
+	// Rotation: the new chain's distribution is sealed but its delivery
+	// loses the publish race to the first message it enables.
+	if err := alice.rotateOwn(room); err != nil {
+		t.Fatal(err)
+	}
+	d2, err := alice.sealDistribution(ctx, room, peerBob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := alice.sealGroup(room, []byte("post-rotation"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob.handleDeliver(deliverOf(room, 2, alice, g))
+	select {
+	case r := <-bob.Inbox:
+		t.Fatalf("post-rotation message arrived before its distribution: %+v", r)
+	default:
+	}
+	if n := len(bob.skPending[skRef{room: room, device: alice.device}]); n != 1 {
+		t.Fatalf("stashed %d messages, want 1", n)
+	}
+
+	// The rotation distribution lands and the stash decrypts.
+	bob.handleDeliver(deliverOf(room, 3, alice, d2))
+	r := inbox(t, bob)
+	if r.Err != nil || string(r.Plaintext) != "post-rotation" {
+		t.Fatalf("stashed post-rotation message: %+v", r)
+	}
+	if n := len(bob.skPending[skRef{room: room, device: alice.device}]); n != 0 {
+		t.Fatalf("stash not drained: %d left", n)
+	}
+}
+
+// TestConcurrentInitiationConverges: both devices initiate before either
+// processes the other's prekey message — the race simultaneous group
+// distribution hits under load. Each side's late prekey message must be
+// settled by the same deterministic tie-break, and both directions must
+// then decrypt.
+func TestConcurrentInitiationConverges(t *testing.T) {
+	base := restDevices(t)
+	ctx := context.Background()
+	alice, err := NewClient(base, [16]byte{1}, [16]byte{0xA1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := NewClient(base, [16]byte{2}, [16]byte{0xB1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []*Client{alice, bob} {
+		if err := c.Register(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	room := [16]byte{9}
+	peerBob := Peer{User: bob.user, Device: bob.device}
+	peerAlice := Peer{User: alice.user, Device: alice.device}
+
+	// Both initiate before anything is delivered.
+	ea, err := alice.sealFor(ctx, room, peerBob, []byte("a-init"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eb, err := bob.sealFor(ctx, room, peerAlice, []byte("b-init"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The wire delivers in seq order; each sender also gets its own echo.
+	alice.handleDeliver(deliverOf(room, 1, alice, ea)) // own echo
+	bob.handleDeliver(deliverOf(room, 1, alice, ea))
+	bob.handleDeliver(deliverOf(room, 2, bob, eb)) // own echo
+	alice.handleDeliver(deliverOf(room, 2, bob, eb))
+
+	// Both directions send over whatever session each side settled on;
+	// each side's first message is the initiation payload itself.
+	ea2, err := alice.sealFor(ctx, room, peerBob, []byte("a-later"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eb2, err := bob.sealFor(ctx, room, peerAlice, []byte("b-later"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice.handleDeliver(deliverOf(room, 3, alice, ea2)) // own echo
+	bob.handleDeliver(deliverOf(room, 3, alice, ea2))
+	bob.handleDeliver(deliverOf(room, 4, bob, eb2)) // own echo
+	alice.handleDeliver(deliverOf(room, 4, bob, eb2))
+
+	for _, tc := range []struct {
+		c        *Client
+		firstGot string
+		want     string
+	}{{bob, "a-init", "a-later"}, {alice, "b-init", "b-later"}} {
+		if r := inbox(t, tc.c); r.Err != nil || string(r.Plaintext) != tc.firstGot {
+			t.Fatalf("%p initiation message: %+v, want %q", tc.c, r, tc.firstGot)
+		}
+		if r := inbox(t, tc.c); r.Err != nil || string(r.Plaintext) != tc.want {
+			t.Fatalf("%p later message: %+v, want %q", tc.c, r, tc.want)
+		}
+	}
+}
+
 // TestDistributionPerRoom: the same sender device's chains installed for
 // one room do not appear in another room.
 func TestDistributionPerRoom(t *testing.T) {
@@ -552,7 +686,7 @@ func TestGroupRotationLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	alice.rotateOwn(room) //nolint:errcheck // the test asserts the chain changed below
+	_ = alice.rotateOwn(room) // the test asserts the chain changed below
 	if alice.skOwn[room] == oldChain {
 		t.Fatal("rotateOwn did not replace the chain")
 	}

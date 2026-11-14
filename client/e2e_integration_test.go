@@ -41,6 +41,7 @@ type e2eStack struct {
 	pool   *pgxpool.Pool
 	scylla *gocql.Session
 	core   *core.Service
+	hub    *ws.Manager
 	room   [16]byte // a DM between userA and userB
 }
 
@@ -87,6 +88,7 @@ func newE2EStack(t *testing.T) *e2eStack {
 		pool:   pool,
 		scylla: scylla,
 		core:   svc,
+		hub:    m,
 		room:   room,
 	}
 }

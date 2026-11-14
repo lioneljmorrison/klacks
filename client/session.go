@@ -5,6 +5,7 @@ package client
 // published envelopes and delivered envelopes back into plaintext.
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -29,12 +30,30 @@ type session struct {
 	// usedOneTime is the one-time prekey id this session's initiation
 	// consumed from the peer's bundle (0 when none was used).
 	usedOneTime int64
+	// initiator records whose X3DH initiation the session serves: the
+	// initiating device's identity DH key and ephemeral key, both from
+	// the session's prekey header (the device's own initiation uses its
+	// own). Simultaneous initiations — both devices of a pair distribute
+	// before either processes the other's message — are settled by a
+	// deterministic tie-break on these, so both sides converge on one
+	// active session; the losing sessions stay as receive-only fallbacks
+	// while their in-flight messages arrive.
+	initID  [32]byte
+	initEph [32]byte
 }
 
 // sessionKey names a session: per room and per peer device.
 type sessionKey struct {
 	room [16]byte
 	peer [16]byte // the peer's device
+}
+
+// fallbackKey names a receive-only fallback session: per room, per peer
+// device, per initiation (the initiation's ephemeral key).
+type fallbackKey struct {
+	room    [16]byte
+	peer    [16]byte
+	initEph [32]byte
 }
 
 // encryptResult is one sealed envelope, ready to publish.
@@ -110,7 +129,8 @@ func (c *Client) initiateLocked(ctx context.Context, room [16]byte, peer Peer) (
 	if err != nil {
 		return nil, err
 	}
-	s := &session{peer: peer, ratchet: r, first: true, pre: pre}
+	s := &session{peer: peer, ratchet: r, first: true, pre: pre,
+		initID: pre.IdentityDH, initEph: pre.Ephemeral}
 	if b.OneTimePrekey != nil {
 		s.usedOneTime = b.OneTimePrekey.ID
 	}
@@ -146,8 +166,13 @@ func (c *Client) unseal(room [16]byte, d deliver) ([]byte, error) {
 	if h.recipient != c.device {
 		return nil, errNotForMe
 	}
-	if !ok {
-		if !h.isPrekey() {
+	if h.isPrekey() {
+		s, err = c.sessionForPrekey(room, key, d.Sender, h)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if !ok {
 			// The session's first message commits after some of its
 			// successors (publishes race for the room lock): stash this
 			// one until the prekey message arrives and establishes the
@@ -156,16 +181,15 @@ func (c *Client) unseal(room [16]byte, d deliver) ([]byte, error) {
 			c.pending[key] = append(c.pending[key], d)
 			return nil, errPending
 		}
-		if s, err = c.respondLocked(room, Peer{User: d.Sender, Device: d.SenderDevice}, h); err != nil {
-			return nil, err
-		}
-	} else if h.isPrekey() && h.dh != s.ratchet.dhRemote {
-		// A prekey header under a different ratchet key: the peer
-		// re-initiated (a new session). The same header again — a
-		// redelivery, or the honest copy after a tampered attempt —
-		// decrypts over the session that was already established.
-		if s, err = c.respondLocked(room, Peer{User: d.Sender, Device: d.SenderDevice}, h); err != nil {
-			return nil, err
+		if h.dh != s.ratchet.dhRemote {
+			// Not the active session's chain: the peer may still be
+			// sending over a session this device demoted in the
+			// initiation tie-break — route by ratchet key. Anything
+			// else is a legitimate DH ratchet step on the active
+			// session.
+			if fb, fok := c.fallbackByDH(room, key.peer, h.dh); fok {
+				s = fb
+			}
 		}
 	}
 	ad := AD{
@@ -176,6 +200,90 @@ func (c *Client) unseal(room [16]byte, d deliver) ([]byte, error) {
 		MessageID:       d.MessageID,
 	}
 	return s.ratchet.Decrypt(d.Header, d.Ciphertext, ad.Bytes())
+}
+
+// sessionForPrekey resolves a prekey-header message to its session. A
+// redelivered initiation decrypts where it was processed before; a new
+// initiation competes with the active session in the deterministic
+// tie-break — the lower (identity DH, ephemeral) initiation wins, the
+// same verdict on both sides — and the loser becomes a receive-only
+// fallback while its in-flight messages arrive. The caller holds c.mu.
+func (c *Client) sessionForPrekey(room [16]byte, key sessionKey, sender [16]byte, h ratchetHeader) (*session, error) {
+	if s, ok := c.sessions[key]; ok && s.initEph == h.pre.Ephemeral {
+		return s, nil // redelivery of the active session's initiation
+	}
+	if s, ok := c.fallbacks[fallbackKey{room: room, peer: key.peer, initEph: h.pre.Ephemeral}]; ok {
+		return s, nil // redelivery of a demoted session's initiation
+	}
+	ns, err := c.respondLocked(room, Peer{User: sender, Device: key.peer}, h)
+	if err != nil {
+		return nil, err
+	}
+	active, ok := c.sessions[key]
+	if !ok || newcomerWins(*h.pre, active) {
+		// The incoming initiation wins: it becomes active and the
+		// demoted session keeps receiving while its messages arrive.
+		if ok {
+			c.addFallback(room, key.peer, active)
+		}
+		c.sessions[key] = ns
+		return ns, nil
+	}
+	// The active session keeps its place; the loser receives only.
+	c.addFallback(room, key.peer, ns)
+	return ns, nil
+}
+
+// newcomerWins settles two competing X3DH initiations: the lower
+// (identity DH key, ephemeral) pair wins, the same verdict on both sides.
+// in is the incoming initiation; active records the one the active
+// session was established by — the device's own when it initiated.
+func newcomerWins(in PrekeyHeader, active *session) bool {
+	if in.IdentityDH == active.initID {
+		// The same initiator re-initiated: the comparison falls to the
+		// ephemerals, deterministic on both sides.
+		return bytes.Compare(in.Ephemeral[:], active.initEph[:]) < 0
+	}
+	if c := bytes.Compare(in.IdentityDH[:], active.initID[:]); c != 0 {
+		return c < 0
+	}
+	return bytes.Compare(in.Ephemeral[:], active.initEph[:]) < 0
+}
+
+// addFallback stores a receive-only session for a peer and bounds the
+// peer's fallbacks, evicting the oldest. The caller holds c.mu.
+func (c *Client) addFallback(room [16]byte, peer [16]byte, s *session) {
+	k := fallbackKey{room: room, peer: peer, initEph: s.initEph}
+	if _, ok := c.fallbacks[k]; !ok {
+		c.fallbackOrder = append(c.fallbackOrder, k)
+	}
+	c.fallbacks[k] = s
+	var kept []fallbackKey
+	perPeer := 0
+	for i := len(c.fallbackOrder) - 1; i >= 0; i-- {
+		fk := c.fallbackOrder[i]
+		if fk.peer != peer || fk.room != room {
+			continue
+		}
+		perPeer++
+		if perPeer > fallbacksKept {
+			delete(c.fallbacks, fk)
+			continue
+		}
+		kept = append([]fallbackKey{fk}, kept...)
+	}
+	c.fallbackOrder = kept
+}
+
+// fallbackByDH finds a peer's fallback session whose remote ratchet key
+// matches a delivered message's header key. The caller holds c.mu.
+func (c *Client) fallbackByDH(room, peer [16]byte, dh [32]byte) (*session, bool) {
+	for k, s := range c.fallbacks {
+		if k.room == room && k.peer == peer && s.ratchet.dhRemote == dh {
+			return s, true
+		}
+	}
+	return nil, false
 }
 
 // respondLocked establishes the responding side of a session from a
@@ -204,13 +312,15 @@ func (c *Client) respondLocked(room [16]byte, peer Peer, h ratchetHeader) (*sess
 	if err != nil {
 		return nil, err
 	}
-	s := &session{peer: peer, ratchet: r}
+	// The session is returned uninstalled: the caller decides whether the
+	// initiation's tie-break makes it active or a receive-only fallback.
+	s := &session{peer: peer, ratchet: r,
+		initID: h.pre.IdentityDH, initEph: h.pre.Ephemeral}
 	if opk != nil {
 		s.usedOneTime = opk.ID
 		// Consumed: the server deleted it at fetch time; drop the private.
 		delete(c.opkPrivs, opk.ID)
 	}
-	c.sessions[sessionKey{room: room, peer: peer.Device}] = s
 	return s, nil
 }
 

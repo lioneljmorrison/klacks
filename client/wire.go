@@ -19,7 +19,9 @@ import (
 )
 
 // Dial opens the WebSocket as this device and starts its read loop. The
-// dev server takes the identity as query parameters.
+// dev server takes the identity as query parameters. Dialing again after
+// Disconnect replaces the connection: the read loop restarts on a fresh
+// reader-done channel.
 func (c *Client) Dial(ctx context.Context) error {
 	url := "ws" + strings.TrimPrefix(c.base, "http") + "/ws?user=" + format(c.user) + "&device=" + format(c.device)
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -32,10 +34,29 @@ func (c *Client) Dial(ctx context.Context) error {
 		_ = resp.Body.Close()
 	}
 	conn.SetReadLimit(-1)
+	c.mu.Lock()
 	c.conn = conn
 	c.readCtx, c.readCancel = context.WithCancel(context.WithoutCancel(ctx))
+	c.readerDone = make(chan struct{})
+	c.mu.Unlock()
 	go c.readLoop()
 	return nil
+}
+
+// Disconnect drops the connection without losing key material or state,
+// as a network outage would: the client can Dial again and resume. Unlike
+// Close, the client stays usable.
+func (c *Client) Disconnect() {
+	c.mu.Lock()
+	readCancel := c.readCancel
+	conn := c.conn
+	c.mu.Unlock()
+	if readCancel != nil {
+		readCancel()
+	}
+	if conn != nil {
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	}
 }
 
 // Close closes the connection and the client's channels.

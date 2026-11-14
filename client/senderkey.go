@@ -72,8 +72,12 @@ const (
 	skCacheLimit = 512
 
 	// skPendingLimit bounds the group messages stashed per sender device
-	// while its distribution is still in flight.
+	// while their distribution is still in flight.
 	skPendingLimit = 64
+
+	// fallbacksKept bounds each peer's receive-only fallback sessions
+	// (session.go's initiation tie-break).
+	fallbacksKept = 4
 
 	kdfSenderKeyMessage = "klacks sender key message v1"
 )
@@ -233,11 +237,15 @@ func decodeSKHeader(header []byte) (prefix, sig []byte, keyID, iteration uint32,
 	return prefix, sig, keyID, iteration, nil
 }
 
-// skState is one installed chain from a sender device: the distribution's
-// material, the skipped message keys for out-of-order arrivals, and the
-// redelivery cache.
+// skState is one installed chain from a sender device. distIter and
+// distChain freeze the distribution's original material for Install's
+// idempotence check: iteration and chainKey advance as messages decrypt,
+// while the distribution itself, redelivered by a resume, still says what
+// it said.
 type skState struct {
 	keyID     uint32
+	distIter  uint32
+	distChain [32]byte
 	iteration uint32
 	chainKey  [32]byte
 	signing   ed25519.PublicKey
@@ -263,9 +271,10 @@ type SenderKeys struct {
 func NewSenderKeys() *SenderKeys { return &SenderKeys{} }
 
 // Install adds a distribution. Installing the same payload again is a
-// no-op (redelivery); the same key id with different material is a
-// conflict and is refused, leaving the installed state intact. Bounded:
-// beyond skStatesKept states the oldest drops.
+// no-op (redelivery); the same key id with different material — including
+// a different snapshot iteration, which an honest sender of that key id
+// never produces — is a conflict and is refused, leaving the installed
+// state intact. Bounded: beyond skStatesKept states the oldest drops.
 func (r *SenderKeys) Install(k SenderKey) error {
 	if k.KeyID == 0 {
 		return errors.New("sender key: key id 0 is not installable")
@@ -274,13 +283,15 @@ func (r *SenderKeys) Install(k SenderKey) error {
 		if s.keyID != k.KeyID {
 			continue
 		}
-		if s.iteration != k.Iteration || s.chainKey != k.ChainKey || !equalPub(s.signing, k.Signing) {
+		if s.distIter != k.Iteration || s.distChain != k.ChainKey || !equalPub(s.signing, k.Signing) {
 			return fmt.Errorf("sender key: key id %d installed with different material", k.KeyID)
 		}
 		return nil // identical redelivery
 	}
 	s := &skState{
 		keyID:     k.KeyID,
+		distIter:  k.Iteration,
+		distChain: k.ChainKey,
 		iteration: k.Iteration,
 		chainKey:  k.ChainKey,
 		signing:   k.Signing,
@@ -443,20 +454,37 @@ type skRef struct {
 
 // sealDistribution seals this device's distribution payload for one peer
 // device over their pairwise session, creating this device's chain for the
-// room first when it has none. The caller publishes the result.
+// room first when it has none. The payload is marshaled under the same
+// critical section that creates the chain, so a concurrent SendGroup
+// cannot advance the chain past the snapshot between the two. The caller
+// publishes the result.
 func (c *Client) sealDistribution(ctx context.Context, room [16]byte, peer Peer) (encryptResult, error) {
+	payload, err := c.prepareDistribution(room)
+	if err != nil {
+		return encryptResult{}, err
+	}
+	return c.sealDistributionTo(ctx, room, peer, payload)
+}
+
+// prepareDistribution returns this device's distribution payload for the
+// room, creating the chain under the same lock that marshals it.
+func (c *Client) prepareDistribution(room [16]byte) ([]byte, error) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.skOwn[room] == nil {
 		ch, err := NewSenderChain()
 		if err != nil {
-			c.mu.Unlock()
-			return encryptResult{}, err
+			return nil, err
 		}
 		c.skOwn[room] = ch
 	}
-	pt := marshalSenderKeyDistribution(c.skOwn[room].Distribution())
-	c.mu.Unlock()
-	return c.sealFor(ctx, room, peer, pt)
+	return marshalSenderKeyDistribution(c.skOwn[room].Distribution()), nil
+}
+
+// sealDistributionTo seals an already-marshaled distribution payload for
+// one peer device over their pairwise session.
+func (c *Client) sealDistributionTo(ctx context.Context, room [16]byte, peer Peer, payload []byte) (encryptResult, error) {
+	return c.sealFor(ctx, room, peer, payload)
 }
 
 // installDistribution installs a received distribution and decrypts
@@ -510,25 +538,32 @@ func groupAD(d deliver) AD {
 }
 
 // decryptGroup decrypts one group message under the sender device's
-// installed chain. With no chain yet — the distribution is still in flight
-// — the message is stashed (bounded) and the unknown-key sentinel
-// returned; the caller stays silent about it.
+// installed chain. With no chain for the message's key id — either no
+// distribution from this sender device at all, or an older one while the
+// next key's distribution is still in flight — the message is stashed
+// (bounded) and the unknown-key sentinel returned; the caller stays
+// silent about it, and installing the distribution drains the stash.
 func (c *Client) decryptGroup(d deliver) ([]byte, error) {
 	key := skRef{room: d.Room, device: d.SenderDevice}
 	c.mu.Lock()
 	r, ok := c.skPeers[key]
-	if !ok {
-		if n := len(c.skPending[key]); n >= skPendingLimit {
-			c.mu.Unlock()
-			return nil, errTooManyPending
-		}
-		c.skPending[key] = append(c.skPending[key], d)
+	if ok {
 		c.mu.Unlock()
-		return nil, errSenderKeyUnknown
+		ad := groupAD(d)
+		pt, err := r.Decrypt(d.Header, d.Ciphertext, ad.Bytes())
+		if !errors.Is(err, errSenderKeyUnknown) {
+			return pt, err
+		}
+		// The key id's distribution has not landed yet: stash below.
+		c.mu.Lock()
 	}
+	if n := len(c.skPending[key]); n >= skPendingLimit {
+		c.mu.Unlock()
+		return nil, errTooManyPending
+	}
+	c.skPending[key] = append(c.skPending[key], d)
 	c.mu.Unlock()
-	ad := groupAD(d)
-	return r.Decrypt(d.Header, d.Ciphertext, ad.Bytes())
+	return nil, errSenderKeyUnknown
 }
 
 // groupDeliver runs one ordering-checked group message through the chain
@@ -606,19 +641,19 @@ func (c *Client) rotateOwn(room [16]byte) error {
 
 // Distribute makes this device's sender key for the room known to every
 // peer device listed, pairwise over their existing Double Ratchet
-// sessions, creating the chain first when there is none (S-27). Peers are
-// every other member device of the room; they become this device's
-// membership view for rotation (S-29).
+// sessions, creating the chain first when there is none (S-27). One
+// payload snapshot is sealed for every peer, so a concurrent SendGroup
+// cannot hand different peers different snapshots; peers are every other
+// member device of the room and become this device's membership view for
+// rotation (S-29).
 func (c *Client) Distribute(ctx context.Context, room [16]byte, peers []Peer) error {
+	payload, err := c.prepareDistribution(room)
+	if err != nil {
+		return err
+	}
 	c.setRoomPeers(room, peers)
-	return c.distribute(ctx, room, peers)
-}
-
-// distribute seals and publishes this device's distribution to each peer
-// device listed.
-func (c *Client) distribute(ctx context.Context, room [16]byte, peers []Peer) error {
 	for _, p := range peers {
-		e, err := c.sealDistribution(ctx, room, p)
+		e, err := c.sealDistributionTo(ctx, room, p, payload)
 		if err != nil {
 			return err
 		}
@@ -631,13 +666,30 @@ func (c *Client) distribute(ctx context.Context, room [16]byte, peers []Peer) er
 
 // Rotate replaces this device's sender key for the room with a fresh one
 // and redistributes it to every peer device listed (S-29's rotation, on a
-// membership change). The listed peers become the room's membership view.
+// membership change). The swap and the payload marshal share one critical
+// section (see rotateAndRedistribute); the listed peers become the room's
+// membership view.
 func (c *Client) Rotate(ctx context.Context, room [16]byte, peers []Peer) error {
-	if err := c.rotateOwn(room); err != nil {
+	c.mu.Lock()
+	ch, err := NewSenderChain()
+	if err != nil {
+		c.mu.Unlock()
 		return err
 	}
+	c.skOwn[room] = ch
+	payload := marshalSenderKeyDistribution(ch.Distribution())
+	c.mu.Unlock()
 	c.setRoomPeers(room, peers)
-	return c.distribute(ctx, room, peers)
+	for _, p := range peers {
+		e, err := c.sealDistributionTo(ctx, room, p, payload)
+		if err != nil {
+			return err
+		}
+		if err := c.publish(ctx, room, e); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // setRoomPeers records the room's member devices, replacing any earlier
@@ -751,23 +803,45 @@ func (c *Client) rotateForGone(room, gone [16]byte) {
 }
 
 // rotateAndRedistribute replaces this device's chain and redistributes it
-// to remaining. Failures surface on Errs: a rotation that cannot publish
+// to remaining. The swap and the payload marshal share one critical
+// section, so a concurrent SendGroup cannot consume chain steps between
+// them: the fresh chain is always marshaled at iteration 0, and every
+// message sent under it is at or past the snapshot every receiver
+// installs. Failures surface on Errs: a rotation that cannot publish
 // leaves the room's messages decryptable by the removed member until the
 // next rotation.
 func (c *Client) rotateAndRedistribute(room [16]byte, remaining []Peer, gone int) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := c.rotateOwn(room); err != nil {
+	c.mu.Lock()
+	ch, err := NewSenderChain()
+	if err != nil {
+		c.mu.Unlock()
 		select {
 		case <-c.done:
 		case c.Errs <- fmt.Errorf("rotate after %d removal(s): %w", gone, err):
 		}
 		return
 	}
-	if err := c.distribute(ctx, room, remaining); err != nil {
-		select {
-		case <-c.done:
-		case c.Errs <- fmt.Errorf("redistribute after %d removal(s): %w", gone, err):
+	c.skOwn[room] = ch
+	payload := marshalSenderKeyDistribution(ch.Distribution())
+	c.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c.redistribute(ctx, room, remaining, payload, gone)
+}
+
+// redistribute seals and publishes one distribution payload to each peer.
+func (c *Client) redistribute(ctx context.Context, room [16]byte, peers []Peer, payload []byte, gone int) {
+	for _, p := range peers {
+		e, err := c.sealDistributionTo(ctx, room, p, payload)
+		if err == nil {
+			err = c.publish(ctx, room, e)
+		}
+		if err != nil {
+			select {
+			case <-c.done:
+			case c.Errs <- fmt.Errorf("redistribute after %d removal(s): %w", gone, err):
+			}
+			return
 		}
 	}
 }
