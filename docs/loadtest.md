@@ -123,5 +123,11 @@ its usual services.
 On lab-hermes the full profile saturates the pool and the room lock
 (p50 64 ms), so publishes queue and delivery falls seconds behind; no
 seq gaps, no error frames, and every room resumed, so nothing was lost.
-On macOS, klacksload dials 100 at a time: at 200, a local server reset
-connections (`kern.ipc.somaxconn` is 128 there).
+klacksload now dials 100 at a time on every platform: at the earlier 200,
+a local server on macOS reset connections (`kern.ipc.somaxconn` is 128
+there).
+
+Code: M4 ran `make perf` at 80e1325 (100 dials); lab-hermes ran
+`scripts/perf.sh` with cross-compiled binaries from 43a8503 (200 dials;
+no Go on that machine). The reports say "commit unknown" because the
+trees were copied without `.git`.
