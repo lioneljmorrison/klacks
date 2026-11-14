@@ -130,3 +130,10 @@ func memberRole(ctx context.Context, l *store.LockedRoom, user store.UUID) (Role
 	}
 	return Role(r), nil
 }
+
+// Members returns the room's member user ids. The resume flow carries the
+// list to clients (S-29), so a returning member can reconcile membership
+// changes it was offline for.
+func (s *Service) Members(ctx context.Context, room store.UUID) ([]store.UUID, error) {
+	return s.rooms.Members(ctx, room)
+}

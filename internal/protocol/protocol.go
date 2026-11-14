@@ -40,8 +40,10 @@ const (
 
 // Server-to-client frame types.
 const (
-	TypeDeliver Type = "deliver"
-	TypeError   Type = "error"
+	TypeDeliver       Type = "deliver"
+	TypeError         Type = "error"
+	TypeMemberRemoved Type = "member_removed"
+	TypeMembers       Type = "members"
 )
 
 // Decode errors. ErrorFor maps them to error frames.
@@ -142,12 +144,35 @@ type Error struct {
 	MessageID UUID   `json:"message_id,omitzero"`
 }
 
-func (*Subscribe) frameType() Type { return TypeSubscribe }
-func (*Resume) frameType() Type    { return TypeResume }
-func (*Publish) frameType() Type   { return TypePublish }
-func (*Ack) frameType() Type       { return TypeAck }
-func (*Deliver) frameType() Type   { return TypeDeliver }
-func (*Error) frameType() Type     { return TypeError }
+// MemberRemoved tells a room's subscribers that User left the room,
+// removed by Actor (Actor == User when they left). It is live-only: never
+// replayed by resume, whose members frame carries the room's current
+// member list instead (S-29). The client sending frame docs live in
+// docs/protocol.md.
+type MemberRemoved struct {
+	Envelope
+	RoomID UUID `json:"room_id"`
+	User   UUID `json:"user"`
+	Actor  UUID `json:"actor"`
+}
+
+// Members is a room's current member list, sent as part of the resume
+// flow (S-29): a client returning from offline diffs it against the
+// members it knows and reconciles the difference.
+type Members struct {
+	Envelope
+	RoomID  UUID   `json:"room_id"`
+	Members []UUID `json:"members"`
+}
+
+func (*Subscribe) frameType() Type     { return TypeSubscribe }
+func (*Resume) frameType() Type        { return TypeResume }
+func (*Publish) frameType() Type       { return TypePublish }
+func (*Ack) frameType() Type           { return TypeAck }
+func (*Deliver) frameType() Type       { return TypeDeliver }
+func (*Error) frameType() Type         { return TypeError }
+func (*MemberRemoved) frameType() Type { return TypeMemberRemoved }
+func (*Members) frameType() Type       { return TypeMembers }
 
 // Encode sets f's version and type and returns its JSON.
 func Encode(f Frame) ([]byte, error) {

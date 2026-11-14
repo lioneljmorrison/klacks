@@ -26,6 +26,12 @@ type ChatService interface {
 	PostMessage(ctx context.Context, room RoomID, sender UserID, payload EncryptedPayload) (Seq, error)
 	Subscribe(ctx context.Context, room RoomID, fromSeq Seq) (<-chan Message, error)
 	RemoveMember(ctx context.Context, room RoomID, user UserID) error
+
+	// Device registration and prekey bundles (S-22, S-23).
+	RegisterDevice(ctx context.Context, user UserID, device DeviceID, bundle PrekeyBundle, oneTimePrekeys []Prekey) error
+	DeviceBundle(ctx context.Context, user UserID, device DeviceID) (PrekeyBundle, ConsumedPrekey, error)
+	AddDevicePrekeys(ctx context.Context, user UserID, device DeviceID, oneTimePrekeys []Prekey) error
+	ListDevices(ctx context.Context, user UserID) ([]DeviceInfo, error)
 }
 
 // Defaults for Config fields left at zero.
@@ -81,6 +87,11 @@ type Config struct {
 	// DefaultSendQueue.
 	SendQueue int
 
+	// OnMemberRemoved, when set, receives every membership removal
+	// (S-29): synchronously after the removal commits, in commit order
+	// per room. It must not block. Nil discards the events.
+	OnMemberRemoved func(ctx context.Context, ev MemberRemoved)
+
 	// Log receives diagnostics, such as closed slow consumers. Nil discards.
 	Log *slog.Logger
 }
@@ -89,11 +100,12 @@ type Config struct {
 // public types and an in-process subscription hub fed by the core's
 // post-commit fan-out.
 type Service struct {
-	cfg    Config
-	log    *slog.Logger
-	core   *core.Service
-	pool   *pgxpool.Pool
-	scylla *gocql.Session
+	cfg     Config
+	log     *slog.Logger
+	core    *core.Service
+	pool    *pgxpool.Pool
+	scylla  *gocql.Session
+	devices *store.Devices
 
 	closeOnce sync.Once
 
@@ -149,12 +161,19 @@ func Open(ctx context.Context, cfg Config) (*Service, error) {
 	}
 
 	s := &Service{
-		cfg:  cfg,
-		log:  log,
-		pool: pool,
-		hub:  make(map[[16]byte]map[*subscription]struct{}),
+		cfg:     cfg,
+		log:     log,
+		pool:    pool,
+		devices: store.NewDevices(pool),
+		hub:     make(map[[16]byte]map[*subscription]struct{}),
 	}
-	s.core = core.New(store.NewRooms(pool, cfg.RoomLockTimeout), store.NewScyllaMessages(sc), s.Deliver, nil)
+	var onRemoved func(context.Context, core.MemberRemoved)
+	if cfg.OnMemberRemoved != nil {
+		onRemoved = func(ctx context.Context, ev core.MemberRemoved) {
+			cfg.OnMemberRemoved(ctx, MemberRemoved{Room: RoomID(ev.Room), User: UserID(ev.User), Actor: UserID(ev.Actor)})
+		}
+	}
+	s.core = core.New(store.NewRooms(pool, cfg.RoomLockTimeout), store.NewScyllaMessages(sc), s.Deliver, onRemoved)
 	return s, nil
 }
 

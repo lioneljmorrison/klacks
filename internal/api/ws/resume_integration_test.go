@@ -158,6 +158,13 @@ func (fs *frameStream) next(t *testing.T, d time.Duration) any {
 	}
 }
 
+// isMembers reports whether a server frame is the resume flow's members
+// frame (S-29), which message-only watchers skip.
+func isMembers(v any) bool {
+	_, ok := v.(*protocol.Members)
+	return ok
+}
+
 func (fs *frameStream) deliver(t *testing.T, d time.Duration) *protocol.Deliver {
 	t.Helper()
 	for {
@@ -169,6 +176,10 @@ func (fs *frameStream) deliver(t *testing.T, d time.Duration) *protocol.Deliver 
 			if df, ok := v.(*protocol.Deliver); ok {
 				return df
 			}
+			if isMembers(v) {
+				continue // the resume flow's members frame (S-29); keep waiting
+			}
+			_ = isMembers
 			continue // an error frame in between; keep waiting
 		case <-time.After(d):
 			t.Fatal("timed out waiting for a deliver frame")
@@ -303,6 +314,11 @@ func TestResumeRandomizedNoGapsOrDuplicates(t *testing.T) {
 				v := w.fs.next(t, 10*time.Second)
 				d, ok := v.(*protocol.Deliver)
 				if !ok {
+					// The resume flow leads with a members frame (S-29):
+					// the watcher only counts messages, so skip it.
+					if _, isMembers := v.(*protocol.Members); isMembers {
+						continue
+					}
 					t.Errorf("watcher got %T (%v); want a deliver frame", v, v)
 					return
 				}
@@ -424,6 +440,11 @@ func TestResumeAcrossBucketBoundary(t *testing.T) {
 		}
 		select {
 		case v := <-fs.ch:
+			if _, ok := v.(*protocol.Members); ok {
+				// The resume flow's members frame (S-29) is expected
+				// and carries no message.
+				break
+			}
 			t.Fatalf("resume from %d: unexpected extra frame %v", lastSeen, v)
 		case <-time.After(150 * time.Millisecond):
 		}
@@ -502,6 +523,11 @@ func TestResumeOrphanNeverDelivered(t *testing.T) {
 	wsResume(t, c, room, 0)
 	select {
 	case v := <-fs.ch:
+		if _, ok := v.(*protocol.Members); ok {
+			// The resume flow's members frame (S-29) is expected and
+			// carries no message.
+			break
+		}
 		t.Fatalf("orphan delivered: %v", v)
 	case <-time.After(150 * time.Millisecond):
 	}

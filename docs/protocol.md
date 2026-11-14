@@ -91,6 +91,8 @@ v1 — delivery itself is the confirmation.
 
 **resume**: deliver every message in the room with `seq > last_seen_seq`,
 then continue live. `last_seen_seq` is `0` to start from the beginning.
+The flow leads with a [`members`](#members) frame (S-29): the room's
+current member list, before any replayed message.
 
 ```json
 {"v":1, "type":"resume", "room_id":"…", "last_seen_seq":41}
@@ -128,6 +130,28 @@ data, so they are always present.
 
 `header` is omitted when empty.
 
+**member_removed**: a member left the room (S-29). Sent live to every
+connection subscribed to the room, including the removed member's (which
+stops processing the room when it sees itself). Never replayed by resume:
+the resume flow's `members` frame carries the authoritative list instead,
+so a client that was offline during the removal reconciles there.
+
+```json
+{"v":1, "type":"member_removed", "room_id":"…", "user":"…", "actor":"…"}
+```
+
+`actor` removed `user`; `actor == user` when a member left.
+
+**members**: a room's current member list, sent as part of the resume
+flow (S-29), before the replayed messages. A returning client diffs it
+against the members it knows and reconciles the difference — every member
+it knows that is absent triggers the same Sender Key rotation a live
+`member_removed` would.
+
+```json
+{"v":1, "type":"members", "room_id":"…", "members":["…","…"]}
+```
+
 **error**: a request failed. `room_id` and `message_id` name the request
 it answers when the server knows them (`message_id` for a publish).
 
@@ -162,3 +186,137 @@ not re-sent.
 Resume itself can burst more frames than the queue holds when a client is
 far behind: a disconnected client resumes again from its new last seen seq
 and makes progress each round.
+
+## Encryption
+
+`header` and `ciphertext` are opaque to the server: klacks stores and relays
+them and never decrypts anything. Interop depends only on the wire format,
+not on which crypto library produced the bytes — libsignal, another library,
+or a hand-rolled implementation all interoperate as long as they speak the
+same format (prekey bundle registration and consumption, X3DH initial
+message, Double Ratchet headers, Sender Key distribution blobs, and AEAD
+associated data binding room, sender, sender device, recipient device and
+message id — see below for the resolved envelope).
+
+The Go reference implementation (`client/`, X3DH + Double Ratchet on
+`x/crypto`) is the executable definition of that format and the test
+oracle; `docs/protocol.md` and `internal/protocol` carry the transport side.
+For shipped clients, [libsignal](https://github.com/signalapp/libsignal) is
+the recommended library — note its **AGPL-3.0 license**: distributing a
+client app built on it requires releasing that app's source under AGPL-3.0.
+Projects that cannot accept that must use a differently licensed
+implementation of the same wire format; the server treats them identically.
+
+### Prekey bundles (S-22)
+
+A device uploads its bundle to `PUT /v1/device/bundle` (replenishing with
+`POST /v1/device/prekeys`, fetching with
+`GET /v1/users/{user}/devices/{device}/bundle`, which hands out one
+one-time prekey and deletes it). The bundle:
+
+- `identity_key` — the device's Ed25519 public key; it signs the bundle.
+- `identity_dh_key` — the identity's X25519 (Montgomery) form. X3DH's DHs
+  need the identity key in Curve25519 form, and converting an Ed25519
+  public key requires field arithmetic no mainstream Go library exposes, so
+  the device uploads the Montgomery form itself. The signature covers it,
+  binding it to the identity key: a swapped form cannot be re-signed.
+- `signed_prekey_id`, `signed_prekey` — the device's X25519 signed prekey,
+  per device, from 1.
+- `signed_prekey_signature` — Ed25519 over the length-prefixed
+  `identity_dh_key || signed_prekey`.
+- one-time prekeys — X25519 public keys, per device ids from 1.
+
+This follows the X3DH spec's DH structure (`DH1 = DH(IK, SPK)`,
+`DH2 = DH(EK, IK)`, `DH3 = DH(EK, SPK)`, `DH4 = DH(EK, OPK)` when the
+bundle had a one-time prekey, mixed with a 32-byte `0xFF` prefix into the
+root key via HKDF-SHA256); only the identity-key conversion differs from
+the paper's XEdDSA path.
+
+### AEAD envelope and associated data (S-25)
+
+Each message is ChaCha20-Poly1305 under a Double Ratchet message key. The
+associated data is fixed-width (no parser, unambiguous boundaries):
+
+    version(1) || room_id(16) || sender_id(16) || sender_device_id(16) ||
+    recipient_device_id(16) || message_id(16)
+
+plus the message's ratchet header bytes appended. Two deviations from the
+original plan (`room || sender || device || seq`), both deliberate:
+
+- **`message_id`, not `seq`.** seq is assigned by the server after the WS
+  publish is sent, so the sender cannot know it when it encrypts. The
+  client-generated `message_id` is stored with the message and echoed in
+  every `deliver`, so it is authenticated on arrival like the rest.
+- **`recipient_device_id`** is bound so a receiver drops other members'
+  copies of a room message before its ratchet state is touched.
+
+`seq` is verified separately, against the room's server-owned ordering
+promise: per room, gap-free, strictly increasing, one message id per seq.
+Tampering with a stored seq therefore shows up as a gap or a duplicate id
+and the client rejects the stream — which is what the tamper-detection
+tests (S-26) assert for every bound field.
+
+Nonce uniqueness: the message key and its nonce are derived together from
+one KDF step of the ratchet chain, so a `(key, nonce)` pair can never
+repeat. Any change to the envelope requires a code review that states its
+`(key, nonce)`-reuse and associated-data consequences (the gate comment on
+`client/envelope.go`).
+
+### Sender Keys (S-27, S-28)
+
+Groups follow Signal's Sender Key scheme (libsignal's `SenderChainKey`,
+`SenderMessageKey`, `GroupCipher`): each member device generates one chain
+per room — a random 32-byte chain key at iteration 0, a random 32-bit key
+id, and an Ed25519 signing pair — and distributes it pairwise over the
+existing Double Ratchet sessions. Group messages are then encrypted once
+under the sender's chain and published as a single broadcast ciphertext.
+
+The distribution rides the pairwise transport: it is an ordinary pairwise
+message whose plaintext is
+
+    "skd1"(4) || key id(4) || iteration(4) || chain key(32) || signing key(32)
+
+76 bytes, fixed width. `"skd1"` is the magic tag that distinguishes a
+distribution from application plaintext after the pairwise ratchet opens
+the envelope; an application plaintext beginning with it would be read as
+a distribution. The delivering frame's room, sender and device fields
+place it: receivers install it per (room, sender device). Installing the
+identical payload again is a no-op (redelivery); the same key id with
+different material is refused as a conflict. Each sender device keeps at
+most 4 recent chains installed, so messages from a recent rotation still
+decrypt while they arrive. Group messages that arrive before their
+distribution (publishes can commit out of send order) are stashed per
+sender device — at most 64 — and decrypt when it lands.
+
+The chain ratchets once per message, per libsignal:
+
+    message key seed = HMAC-SHA256(chain key, 0x01)
+    next chain key   = HMAC-SHA256(chain key, 0x02)
+    message key      = HKDF-SHA256(ikm = seed, salt = 0,
+                                   info = "klacks sender key message v1",
+                                   44) → key(32) + nonce(12)
+
+so each chain step draws one (key, nonce) pair and never repeats it.
+
+A group message's publish carries its header in the `header` field:
+
+    version 0x01(1) || type 0x03(1) || key id(4) || iteration(4) ||
+    Ed25519 signature(64)
+
+The AEAD is ChaCha20-Poly1305 — the envelope's primitive, in place of
+libsignal's AES-CBC+HMAC — with associated data `AD || header[:10]`, where
+AD is the fixed-width associated data above with the recipient device
+zero: the broadcast copy binds no single recipient. The Ed25519 signature
+under the chain's signing key covers `header[:10] || ciphertext`: everyone
+in the group holds the sender key, so the signature is what attributes the
+message to the distributing device and keeps other holders from forging
+its messages. Receivers verify the signature, then derive the message key
+at the header's iteration — stashing skipped keys for out-of-order
+arrivals, at most 2000 chain steps ahead (libsignal's GroupCipher limit) —
+and open. Like the Double Ratchet, the step runs on a copy and commits
+only on success, and an identical redelivery returns the original
+plaintext while different content at the same chain position is refused.
+
+Key rotation (S-29) replaces the sender's chain with a fresh key id and
+redistributes; the removed member receives no distribution addressed to
+them.

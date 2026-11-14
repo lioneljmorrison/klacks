@@ -627,6 +627,593 @@ func (x *Message) GetCreatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// PrekeyBundle is a device's uploaded X3DH prekey bundle, public keys only.
+// The server validates shapes only: sizes, ids, counts. It never sees
+// private key material and never verifies signatures.
+type PrekeyBundle struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	IdentityKey           []byte                 `protobuf:"bytes,1,opt,name=identity_key,json=identityKey,proto3" json:"identity_key,omitempty"`                                 // Ed25519 public key
+	IdentityDhKey         []byte                 `protobuf:"bytes,2,opt,name=identity_dh_key,json=identityDhKey,proto3" json:"identity_dh_key,omitempty"`                         // X25519 (Montgomery) form of the identity
+	SignedPrekeyId        int64                  `protobuf:"varint,3,opt,name=signed_prekey_id,json=signedPrekeyId,proto3" json:"signed_prekey_id,omitempty"`                     // per device, from 1
+	SignedPrekey          []byte                 `protobuf:"bytes,4,opt,name=signed_prekey,json=signedPrekey,proto3" json:"signed_prekey,omitempty"`                              // X25519 public key
+	SignedPrekeySignature []byte                 `protobuf:"bytes,5,opt,name=signed_prekey_signature,json=signedPrekeySignature,proto3" json:"signed_prekey_signature,omitempty"` // Ed25519 signature
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *PrekeyBundle) Reset() {
+	*x = PrekeyBundle{}
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PrekeyBundle) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrekeyBundle) ProtoMessage() {}
+
+func (x *PrekeyBundle) ProtoReflect() protoreflect.Message {
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrekeyBundle.ProtoReflect.Descriptor instead.
+func (*PrekeyBundle) Descriptor() ([]byte, []int) {
+	return file_klacks_chat_v1_chat_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *PrekeyBundle) GetIdentityKey() []byte {
+	if x != nil {
+		return x.IdentityKey
+	}
+	return nil
+}
+
+func (x *PrekeyBundle) GetIdentityDhKey() []byte {
+	if x != nil {
+		return x.IdentityDhKey
+	}
+	return nil
+}
+
+func (x *PrekeyBundle) GetSignedPrekeyId() int64 {
+	if x != nil {
+		return x.SignedPrekeyId
+	}
+	return 0
+}
+
+func (x *PrekeyBundle) GetSignedPrekey() []byte {
+	if x != nil {
+		return x.SignedPrekey
+	}
+	return nil
+}
+
+func (x *PrekeyBundle) GetSignedPrekeySignature() []byte {
+	if x != nil {
+		return x.SignedPrekeySignature
+	}
+	return nil
+}
+
+type Prekey struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`  // per device, from 1
+	Key           []byte                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"` // X25519 public key
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Prekey) Reset() {
+	*x = Prekey{}
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Prekey) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Prekey) ProtoMessage() {}
+
+func (x *Prekey) ProtoReflect() protoreflect.Message {
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Prekey.ProtoReflect.Descriptor instead.
+func (*Prekey) Descriptor() ([]byte, []int) {
+	return file_klacks_chat_v1_chat_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *Prekey) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *Prekey) GetKey() []byte {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+type RegisterDeviceRequest struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	UserId         []byte                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	DeviceId       []byte                 `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	Bundle         *PrekeyBundle          `protobuf:"bytes,3,opt,name=bundle,proto3" json:"bundle,omitempty"`
+	OneTimePrekeys []*Prekey              `protobuf:"bytes,4,rep,name=one_time_prekeys,json=oneTimePrekeys,proto3" json:"one_time_prekeys,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RegisterDeviceRequest) Reset() {
+	*x = RegisterDeviceRequest{}
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterDeviceRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterDeviceRequest) ProtoMessage() {}
+
+func (x *RegisterDeviceRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterDeviceRequest.ProtoReflect.Descriptor instead.
+func (*RegisterDeviceRequest) Descriptor() ([]byte, []int) {
+	return file_klacks_chat_v1_chat_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *RegisterDeviceRequest) GetUserId() []byte {
+	if x != nil {
+		return x.UserId
+	}
+	return nil
+}
+
+func (x *RegisterDeviceRequest) GetDeviceId() []byte {
+	if x != nil {
+		return x.DeviceId
+	}
+	return nil
+}
+
+func (x *RegisterDeviceRequest) GetBundle() *PrekeyBundle {
+	if x != nil {
+		return x.Bundle
+	}
+	return nil
+}
+
+func (x *RegisterDeviceRequest) GetOneTimePrekeys() []*Prekey {
+	if x != nil {
+		return x.OneTimePrekeys
+	}
+	return nil
+}
+
+type RegisterDeviceResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegisterDeviceResponse) Reset() {
+	*x = RegisterDeviceResponse{}
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterDeviceResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterDeviceResponse) ProtoMessage() {}
+
+func (x *RegisterDeviceResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterDeviceResponse.ProtoReflect.Descriptor instead.
+func (*RegisterDeviceResponse) Descriptor() ([]byte, []int) {
+	return file_klacks_chat_v1_chat_proto_rawDescGZIP(), []int{14}
+}
+
+type DeviceBundleRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        []byte                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	DeviceId      []byte                 `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeviceBundleRequest) Reset() {
+	*x = DeviceBundleRequest{}
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeviceBundleRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeviceBundleRequest) ProtoMessage() {}
+
+func (x *DeviceBundleRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeviceBundleRequest.ProtoReflect.Descriptor instead.
+func (*DeviceBundleRequest) Descriptor() ([]byte, []int) {
+	return file_klacks_chat_v1_chat_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *DeviceBundleRequest) GetUserId() []byte {
+	if x != nil {
+		return x.UserId
+	}
+	return nil
+}
+
+func (x *DeviceBundleRequest) GetDeviceId() []byte {
+	if x != nil {
+		return x.DeviceId
+	}
+	return nil
+}
+
+// The response carries the bundle and the one-time prekey the fetch
+// consumed; one_time_prekey is omitted when the device has none left.
+// remaining is the device's count after the fetch, the fetcher's
+// low-watermark signal to replenish.
+type DeviceBundleResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Bundle        *PrekeyBundle          `protobuf:"bytes,1,opt,name=bundle,proto3" json:"bundle,omitempty"`
+	OneTimePrekey *Prekey                `protobuf:"bytes,2,opt,name=one_time_prekey,json=oneTimePrekey,proto3" json:"one_time_prekey,omitempty"`
+	Remaining     int32                  `protobuf:"varint,3,opt,name=remaining,proto3" json:"remaining,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeviceBundleResponse) Reset() {
+	*x = DeviceBundleResponse{}
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeviceBundleResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeviceBundleResponse) ProtoMessage() {}
+
+func (x *DeviceBundleResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeviceBundleResponse.ProtoReflect.Descriptor instead.
+func (*DeviceBundleResponse) Descriptor() ([]byte, []int) {
+	return file_klacks_chat_v1_chat_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *DeviceBundleResponse) GetBundle() *PrekeyBundle {
+	if x != nil {
+		return x.Bundle
+	}
+	return nil
+}
+
+func (x *DeviceBundleResponse) GetOneTimePrekey() *Prekey {
+	if x != nil {
+		return x.OneTimePrekey
+	}
+	return nil
+}
+
+func (x *DeviceBundleResponse) GetRemaining() int32 {
+	if x != nil {
+		return x.Remaining
+	}
+	return 0
+}
+
+type AddDevicePrekeysRequest struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	UserId         []byte                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	DeviceId       []byte                 `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	OneTimePrekeys []*Prekey              `protobuf:"bytes,3,rep,name=one_time_prekeys,json=oneTimePrekeys,proto3" json:"one_time_prekeys,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *AddDevicePrekeysRequest) Reset() {
+	*x = AddDevicePrekeysRequest{}
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddDevicePrekeysRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddDevicePrekeysRequest) ProtoMessage() {}
+
+func (x *AddDevicePrekeysRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddDevicePrekeysRequest.ProtoReflect.Descriptor instead.
+func (*AddDevicePrekeysRequest) Descriptor() ([]byte, []int) {
+	return file_klacks_chat_v1_chat_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *AddDevicePrekeysRequest) GetUserId() []byte {
+	if x != nil {
+		return x.UserId
+	}
+	return nil
+}
+
+func (x *AddDevicePrekeysRequest) GetDeviceId() []byte {
+	if x != nil {
+		return x.DeviceId
+	}
+	return nil
+}
+
+func (x *AddDevicePrekeysRequest) GetOneTimePrekeys() []*Prekey {
+	if x != nil {
+		return x.OneTimePrekeys
+	}
+	return nil
+}
+
+type AddDevicePrekeysResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddDevicePrekeysResponse) Reset() {
+	*x = AddDevicePrekeysResponse{}
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddDevicePrekeysResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddDevicePrekeysResponse) ProtoMessage() {}
+
+func (x *AddDevicePrekeysResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddDevicePrekeysResponse.ProtoReflect.Descriptor instead.
+func (*AddDevicePrekeysResponse) Descriptor() ([]byte, []int) {
+	return file_klacks_chat_v1_chat_proto_rawDescGZIP(), []int{18}
+}
+
+type Device struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	DeviceId      []byte                 `protobuf:"bytes,1,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	LastSeenAt    *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=last_seen_at,json=lastSeenAt,proto3" json:"last_seen_at,omitempty"` // omitted when never seen
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Device) Reset() {
+	*x = Device{}
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Device) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Device) ProtoMessage() {}
+
+func (x *Device) ProtoReflect() protoreflect.Message {
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Device.ProtoReflect.Descriptor instead.
+func (*Device) Descriptor() ([]byte, []int) {
+	return file_klacks_chat_v1_chat_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *Device) GetDeviceId() []byte {
+	if x != nil {
+		return x.DeviceId
+	}
+	return nil
+}
+
+func (x *Device) GetLastSeenAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastSeenAt
+	}
+	return nil
+}
+
+type ListDevicesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        []byte                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListDevicesRequest) Reset() {
+	*x = ListDevicesRequest{}
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListDevicesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListDevicesRequest) ProtoMessage() {}
+
+func (x *ListDevicesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListDevicesRequest.ProtoReflect.Descriptor instead.
+func (*ListDevicesRequest) Descriptor() ([]byte, []int) {
+	return file_klacks_chat_v1_chat_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ListDevicesRequest) GetUserId() []byte {
+	if x != nil {
+		return x.UserId
+	}
+	return nil
+}
+
+type ListDevicesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Devices       []*Device              `protobuf:"bytes,1,rep,name=devices,proto3" json:"devices,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListDevicesResponse) Reset() {
+	*x = ListDevicesResponse{}
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListDevicesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListDevicesResponse) ProtoMessage() {}
+
+func (x *ListDevicesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_klacks_chat_v1_chat_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListDevicesResponse.ProtoReflect.Descriptor instead.
+func (*ListDevicesResponse) Descriptor() ([]byte, []int) {
+	return file_klacks_chat_v1_chat_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ListDevicesResponse) GetDevices() []*Device {
+	if x != nil {
+		return x.Devices
+	}
+	return nil
+}
+
 var File_klacks_chat_v1_chat_proto protoreflect.FileDescriptor
 
 const file_klacks_chat_v1_chat_proto_rawDesc = "" +
@@ -674,14 +1261,53 @@ const file_klacks_chat_v1_chat_proto_rawDesc = "" +
 	"ciphertext\x12\x16\n" +
 	"\x06header\x18\a \x01(\fR\x06header\x129\n" +
 	"\n" +
-	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt2\xb1\x03\n" +
+	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xe0\x01\n" +
+	"\fPrekeyBundle\x12!\n" +
+	"\fidentity_key\x18\x01 \x01(\fR\videntityKey\x12&\n" +
+	"\x0fidentity_dh_key\x18\x02 \x01(\fR\ridentityDhKey\x12(\n" +
+	"\x10signed_prekey_id\x18\x03 \x01(\x03R\x0esignedPrekeyId\x12#\n" +
+	"\rsigned_prekey\x18\x04 \x01(\fR\fsignedPrekey\x126\n" +
+	"\x17signed_prekey_signature\x18\x05 \x01(\fR\x15signedPrekeySignature\"*\n" +
+	"\x06Prekey\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\fR\x03key\"\xc5\x01\n" +
+	"\x15RegisterDeviceRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\fR\x06userId\x12\x1b\n" +
+	"\tdevice_id\x18\x02 \x01(\fR\bdeviceId\x124\n" +
+	"\x06bundle\x18\x03 \x01(\v2\x1c.klacks.chat.v1.PrekeyBundleR\x06bundle\x12@\n" +
+	"\x10one_time_prekeys\x18\x04 \x03(\v2\x16.klacks.chat.v1.PrekeyR\x0eoneTimePrekeys\"\x18\n" +
+	"\x16RegisterDeviceResponse\"K\n" +
+	"\x13DeviceBundleRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\fR\x06userId\x12\x1b\n" +
+	"\tdevice_id\x18\x02 \x01(\fR\bdeviceId\"\xaa\x01\n" +
+	"\x14DeviceBundleResponse\x124\n" +
+	"\x06bundle\x18\x01 \x01(\v2\x1c.klacks.chat.v1.PrekeyBundleR\x06bundle\x12>\n" +
+	"\x0fone_time_prekey\x18\x02 \x01(\v2\x16.klacks.chat.v1.PrekeyR\roneTimePrekey\x12\x1c\n" +
+	"\tremaining\x18\x03 \x01(\x05R\tremaining\"\x91\x01\n" +
+	"\x17AddDevicePrekeysRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\fR\x06userId\x12\x1b\n" +
+	"\tdevice_id\x18\x02 \x01(\fR\bdeviceId\x12@\n" +
+	"\x10one_time_prekeys\x18\x03 \x03(\v2\x16.klacks.chat.v1.PrekeyR\x0eoneTimePrekeys\"\x1a\n" +
+	"\x18AddDevicePrekeysResponse\"c\n" +
+	"\x06Device\x12\x1b\n" +
+	"\tdevice_id\x18\x01 \x01(\fR\bdeviceId\x12<\n" +
+	"\flast_seen_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"lastSeenAt\"-\n" +
+	"\x12ListDevicesRequest\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\fR\x06userId\"G\n" +
+	"\x13ListDevicesResponse\x120\n" +
+	"\adevices\x18\x01 \x03(\v2\x16.klacks.chat.v1.DeviceR\adevices2\xac\x06\n" +
 	"\vChatService\x12S\n" +
 	"\n" +
 	"CreateRoom\x12!.klacks.chat.v1.CreateRoomRequest\x1a\".klacks.chat.v1.CreateRoomResponse\x12P\n" +
 	"\tAddMember\x12 .klacks.chat.v1.AddMemberRequest\x1a!.klacks.chat.v1.AddMemberResponse\x12Y\n" +
 	"\fRemoveMember\x12#.klacks.chat.v1.RemoveMemberRequest\x1a$.klacks.chat.v1.RemoveMemberResponse\x12V\n" +
 	"\vPostMessage\x12\".klacks.chat.v1.PostMessageRequest\x1a#.klacks.chat.v1.PostMessageResponse\x12H\n" +
-	"\tSubscribe\x12 .klacks.chat.v1.SubscribeRequest\x1a\x17.klacks.chat.v1.Message0\x01BAZ?github.com/lioneljmorrison/klacks/api/gen/klacks/chat/v1;chatv1b\x06proto3"
+	"\tSubscribe\x12 .klacks.chat.v1.SubscribeRequest\x1a\x17.klacks.chat.v1.Message0\x01\x12_\n" +
+	"\x0eRegisterDevice\x12%.klacks.chat.v1.RegisterDeviceRequest\x1a&.klacks.chat.v1.RegisterDeviceResponse\x12Y\n" +
+	"\fDeviceBundle\x12#.klacks.chat.v1.DeviceBundleRequest\x1a$.klacks.chat.v1.DeviceBundleResponse\x12e\n" +
+	"\x10AddDevicePrekeys\x12'.klacks.chat.v1.AddDevicePrekeysRequest\x1a(.klacks.chat.v1.AddDevicePrekeysResponse\x12V\n" +
+	"\vListDevices\x12\".klacks.chat.v1.ListDevicesRequest\x1a#.klacks.chat.v1.ListDevicesResponseBAZ?github.com/lioneljmorrison/klacks/api/gen/klacks/chat/v1;chatv1b\x06proto3"
 
 var (
 	file_klacks_chat_v1_chat_proto_rawDescOnce sync.Once
@@ -695,39 +1321,65 @@ func file_klacks_chat_v1_chat_proto_rawDescGZIP() []byte {
 	return file_klacks_chat_v1_chat_proto_rawDescData
 }
 
-var file_klacks_chat_v1_chat_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_klacks_chat_v1_chat_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_klacks_chat_v1_chat_proto_goTypes = []any{
-	(*CreateRoomRequest)(nil),     // 0: klacks.chat.v1.CreateRoomRequest
-	(*CreateRoomResponse)(nil),    // 1: klacks.chat.v1.CreateRoomResponse
-	(*AddMemberRequest)(nil),      // 2: klacks.chat.v1.AddMemberRequest
-	(*AddMemberResponse)(nil),     // 3: klacks.chat.v1.AddMemberResponse
-	(*RemoveMemberRequest)(nil),   // 4: klacks.chat.v1.RemoveMemberRequest
-	(*RemoveMemberResponse)(nil),  // 5: klacks.chat.v1.RemoveMemberResponse
-	(*EncryptedPayload)(nil),      // 6: klacks.chat.v1.EncryptedPayload
-	(*PostMessageRequest)(nil),    // 7: klacks.chat.v1.PostMessageRequest
-	(*PostMessageResponse)(nil),   // 8: klacks.chat.v1.PostMessageResponse
-	(*SubscribeRequest)(nil),      // 9: klacks.chat.v1.SubscribeRequest
-	(*Message)(nil),               // 10: klacks.chat.v1.Message
-	(*timestamppb.Timestamp)(nil), // 11: google.protobuf.Timestamp
+	(*CreateRoomRequest)(nil),        // 0: klacks.chat.v1.CreateRoomRequest
+	(*CreateRoomResponse)(nil),       // 1: klacks.chat.v1.CreateRoomResponse
+	(*AddMemberRequest)(nil),         // 2: klacks.chat.v1.AddMemberRequest
+	(*AddMemberResponse)(nil),        // 3: klacks.chat.v1.AddMemberResponse
+	(*RemoveMemberRequest)(nil),      // 4: klacks.chat.v1.RemoveMemberRequest
+	(*RemoveMemberResponse)(nil),     // 5: klacks.chat.v1.RemoveMemberResponse
+	(*EncryptedPayload)(nil),         // 6: klacks.chat.v1.EncryptedPayload
+	(*PostMessageRequest)(nil),       // 7: klacks.chat.v1.PostMessageRequest
+	(*PostMessageResponse)(nil),      // 8: klacks.chat.v1.PostMessageResponse
+	(*SubscribeRequest)(nil),         // 9: klacks.chat.v1.SubscribeRequest
+	(*Message)(nil),                  // 10: klacks.chat.v1.Message
+	(*PrekeyBundle)(nil),             // 11: klacks.chat.v1.PrekeyBundle
+	(*Prekey)(nil),                   // 12: klacks.chat.v1.Prekey
+	(*RegisterDeviceRequest)(nil),    // 13: klacks.chat.v1.RegisterDeviceRequest
+	(*RegisterDeviceResponse)(nil),   // 14: klacks.chat.v1.RegisterDeviceResponse
+	(*DeviceBundleRequest)(nil),      // 15: klacks.chat.v1.DeviceBundleRequest
+	(*DeviceBundleResponse)(nil),     // 16: klacks.chat.v1.DeviceBundleResponse
+	(*AddDevicePrekeysRequest)(nil),  // 17: klacks.chat.v1.AddDevicePrekeysRequest
+	(*AddDevicePrekeysResponse)(nil), // 18: klacks.chat.v1.AddDevicePrekeysResponse
+	(*Device)(nil),                   // 19: klacks.chat.v1.Device
+	(*ListDevicesRequest)(nil),       // 20: klacks.chat.v1.ListDevicesRequest
+	(*ListDevicesResponse)(nil),      // 21: klacks.chat.v1.ListDevicesResponse
+	(*timestamppb.Timestamp)(nil),    // 22: google.protobuf.Timestamp
 }
 var file_klacks_chat_v1_chat_proto_depIdxs = []int32{
 	6,  // 0: klacks.chat.v1.PostMessageRequest.payload:type_name -> klacks.chat.v1.EncryptedPayload
-	11, // 1: klacks.chat.v1.Message.created_at:type_name -> google.protobuf.Timestamp
-	0,  // 2: klacks.chat.v1.ChatService.CreateRoom:input_type -> klacks.chat.v1.CreateRoomRequest
-	2,  // 3: klacks.chat.v1.ChatService.AddMember:input_type -> klacks.chat.v1.AddMemberRequest
-	4,  // 4: klacks.chat.v1.ChatService.RemoveMember:input_type -> klacks.chat.v1.RemoveMemberRequest
-	7,  // 5: klacks.chat.v1.ChatService.PostMessage:input_type -> klacks.chat.v1.PostMessageRequest
-	9,  // 6: klacks.chat.v1.ChatService.Subscribe:input_type -> klacks.chat.v1.SubscribeRequest
-	1,  // 7: klacks.chat.v1.ChatService.CreateRoom:output_type -> klacks.chat.v1.CreateRoomResponse
-	3,  // 8: klacks.chat.v1.ChatService.AddMember:output_type -> klacks.chat.v1.AddMemberResponse
-	5,  // 9: klacks.chat.v1.ChatService.RemoveMember:output_type -> klacks.chat.v1.RemoveMemberResponse
-	8,  // 10: klacks.chat.v1.ChatService.PostMessage:output_type -> klacks.chat.v1.PostMessageResponse
-	10, // 11: klacks.chat.v1.ChatService.Subscribe:output_type -> klacks.chat.v1.Message
-	7,  // [7:12] is the sub-list for method output_type
-	2,  // [2:7] is the sub-list for method input_type
-	2,  // [2:2] is the sub-list for extension type_name
-	2,  // [2:2] is the sub-list for extension extendee
-	0,  // [0:2] is the sub-list for field type_name
+	22, // 1: klacks.chat.v1.Message.created_at:type_name -> google.protobuf.Timestamp
+	11, // 2: klacks.chat.v1.RegisterDeviceRequest.bundle:type_name -> klacks.chat.v1.PrekeyBundle
+	12, // 3: klacks.chat.v1.RegisterDeviceRequest.one_time_prekeys:type_name -> klacks.chat.v1.Prekey
+	11, // 4: klacks.chat.v1.DeviceBundleResponse.bundle:type_name -> klacks.chat.v1.PrekeyBundle
+	12, // 5: klacks.chat.v1.DeviceBundleResponse.one_time_prekey:type_name -> klacks.chat.v1.Prekey
+	12, // 6: klacks.chat.v1.AddDevicePrekeysRequest.one_time_prekeys:type_name -> klacks.chat.v1.Prekey
+	22, // 7: klacks.chat.v1.Device.last_seen_at:type_name -> google.protobuf.Timestamp
+	19, // 8: klacks.chat.v1.ListDevicesResponse.devices:type_name -> klacks.chat.v1.Device
+	0,  // 9: klacks.chat.v1.ChatService.CreateRoom:input_type -> klacks.chat.v1.CreateRoomRequest
+	2,  // 10: klacks.chat.v1.ChatService.AddMember:input_type -> klacks.chat.v1.AddMemberRequest
+	4,  // 11: klacks.chat.v1.ChatService.RemoveMember:input_type -> klacks.chat.v1.RemoveMemberRequest
+	7,  // 12: klacks.chat.v1.ChatService.PostMessage:input_type -> klacks.chat.v1.PostMessageRequest
+	9,  // 13: klacks.chat.v1.ChatService.Subscribe:input_type -> klacks.chat.v1.SubscribeRequest
+	13, // 14: klacks.chat.v1.ChatService.RegisterDevice:input_type -> klacks.chat.v1.RegisterDeviceRequest
+	15, // 15: klacks.chat.v1.ChatService.DeviceBundle:input_type -> klacks.chat.v1.DeviceBundleRequest
+	17, // 16: klacks.chat.v1.ChatService.AddDevicePrekeys:input_type -> klacks.chat.v1.AddDevicePrekeysRequest
+	20, // 17: klacks.chat.v1.ChatService.ListDevices:input_type -> klacks.chat.v1.ListDevicesRequest
+	1,  // 18: klacks.chat.v1.ChatService.CreateRoom:output_type -> klacks.chat.v1.CreateRoomResponse
+	3,  // 19: klacks.chat.v1.ChatService.AddMember:output_type -> klacks.chat.v1.AddMemberResponse
+	5,  // 20: klacks.chat.v1.ChatService.RemoveMember:output_type -> klacks.chat.v1.RemoveMemberResponse
+	8,  // 21: klacks.chat.v1.ChatService.PostMessage:output_type -> klacks.chat.v1.PostMessageResponse
+	10, // 22: klacks.chat.v1.ChatService.Subscribe:output_type -> klacks.chat.v1.Message
+	14, // 23: klacks.chat.v1.ChatService.RegisterDevice:output_type -> klacks.chat.v1.RegisterDeviceResponse
+	16, // 24: klacks.chat.v1.ChatService.DeviceBundle:output_type -> klacks.chat.v1.DeviceBundleResponse
+	18, // 25: klacks.chat.v1.ChatService.AddDevicePrekeys:output_type -> klacks.chat.v1.AddDevicePrekeysResponse
+	21, // 26: klacks.chat.v1.ChatService.ListDevices:output_type -> klacks.chat.v1.ListDevicesResponse
+	18, // [18:27] is the sub-list for method output_type
+	9,  // [9:18] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_klacks_chat_v1_chat_proto_init() }
@@ -741,7 +1393,7 @@ func file_klacks_chat_v1_chat_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_klacks_chat_v1_chat_proto_rawDesc), len(file_klacks_chat_v1_chat_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

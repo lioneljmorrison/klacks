@@ -57,6 +57,23 @@ func (f *fakeChat) RemoveMember(ctx context.Context, room chat.RoomID, user chat
 	return errors.New("not expected")
 }
 
+// Device methods: the scheduler example never calls them.
+func (f *fakeChat) RegisterDevice(context.Context, chat.UserID, chat.DeviceID, chat.PrekeyBundle, []chat.Prekey) error {
+	return errors.New("not expected")
+}
+
+func (f *fakeChat) DeviceBundle(context.Context, chat.UserID, chat.DeviceID) (chat.PrekeyBundle, chat.ConsumedPrekey, error) {
+	return chat.PrekeyBundle{}, chat.ConsumedPrekey{}, errors.New("not expected")
+}
+
+func (f *fakeChat) AddDevicePrekeys(context.Context, chat.UserID, chat.DeviceID, []chat.Prekey) error {
+	return errors.New("not expected")
+}
+
+func (f *fakeChat) ListDevices(context.Context, chat.UserID) ([]chat.DeviceInfo, error) {
+	return nil, errors.New("not expected")
+}
+
 // uid builds a distinct user ID per test.
 func uid(b byte) chat.UserID { return chat.UserID{15: b} }
 

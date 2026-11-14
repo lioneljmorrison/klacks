@@ -25,11 +25,15 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ChatService_CreateRoom_FullMethodName   = "/klacks.chat.v1.ChatService/CreateRoom"
-	ChatService_AddMember_FullMethodName    = "/klacks.chat.v1.ChatService/AddMember"
-	ChatService_RemoveMember_FullMethodName = "/klacks.chat.v1.ChatService/RemoveMember"
-	ChatService_PostMessage_FullMethodName  = "/klacks.chat.v1.ChatService/PostMessage"
-	ChatService_Subscribe_FullMethodName    = "/klacks.chat.v1.ChatService/Subscribe"
+	ChatService_CreateRoom_FullMethodName       = "/klacks.chat.v1.ChatService/CreateRoom"
+	ChatService_AddMember_FullMethodName        = "/klacks.chat.v1.ChatService/AddMember"
+	ChatService_RemoveMember_FullMethodName     = "/klacks.chat.v1.ChatService/RemoveMember"
+	ChatService_PostMessage_FullMethodName      = "/klacks.chat.v1.ChatService/PostMessage"
+	ChatService_Subscribe_FullMethodName        = "/klacks.chat.v1.ChatService/Subscribe"
+	ChatService_RegisterDevice_FullMethodName   = "/klacks.chat.v1.ChatService/RegisterDevice"
+	ChatService_DeviceBundle_FullMethodName     = "/klacks.chat.v1.ChatService/DeviceBundle"
+	ChatService_AddDevicePrekeys_FullMethodName = "/klacks.chat.v1.ChatService/AddDevicePrekeys"
+	ChatService_ListDevices_FullMethodName      = "/klacks.chat.v1.ChatService/ListDevices"
 )
 
 // ChatServiceClient is the client API for ChatService service.
@@ -55,6 +59,14 @@ type ChatServiceClient interface {
 	// replay, or the consumer falls behind; the client resubscribes from the
 	// last seq it received.
 	Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Message], error)
+	// Device registration and prekey bundles (S-22). RegisterDevice upserts
+	// the (user_id, device_id) bundle and its initial one-time prekeys;
+	// DeviceBundle fetches a bundle and consumes one of its one-time prekeys
+	// (S-23), deleted server-side so it is never handed out twice.
+	RegisterDevice(ctx context.Context, in *RegisterDeviceRequest, opts ...grpc.CallOption) (*RegisterDeviceResponse, error)
+	DeviceBundle(ctx context.Context, in *DeviceBundleRequest, opts ...grpc.CallOption) (*DeviceBundleResponse, error)
+	AddDevicePrekeys(ctx context.Context, in *AddDevicePrekeysRequest, opts ...grpc.CallOption) (*AddDevicePrekeysResponse, error)
+	ListDevices(ctx context.Context, in *ListDevicesRequest, opts ...grpc.CallOption) (*ListDevicesResponse, error)
 }
 
 type chatServiceClient struct {
@@ -124,6 +136,46 @@ func (c *chatServiceClient) Subscribe(ctx context.Context, in *SubscribeRequest,
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ChatService_SubscribeClient = grpc.ServerStreamingClient[Message]
 
+func (c *chatServiceClient) RegisterDevice(ctx context.Context, in *RegisterDeviceRequest, opts ...grpc.CallOption) (*RegisterDeviceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegisterDeviceResponse)
+	err := c.cc.Invoke(ctx, ChatService_RegisterDevice_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *chatServiceClient) DeviceBundle(ctx context.Context, in *DeviceBundleRequest, opts ...grpc.CallOption) (*DeviceBundleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeviceBundleResponse)
+	err := c.cc.Invoke(ctx, ChatService_DeviceBundle_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *chatServiceClient) AddDevicePrekeys(ctx context.Context, in *AddDevicePrekeysRequest, opts ...grpc.CallOption) (*AddDevicePrekeysResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddDevicePrekeysResponse)
+	err := c.cc.Invoke(ctx, ChatService_AddDevicePrekeys_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *chatServiceClient) ListDevices(ctx context.Context, in *ListDevicesRequest, opts ...grpc.CallOption) (*ListDevicesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListDevicesResponse)
+	err := c.cc.Invoke(ctx, ChatService_ListDevices_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ChatServiceServer is the server API for ChatService service.
 // All implementations must embed UnimplementedChatServiceServer
 // for forward compatibility.
@@ -147,6 +199,14 @@ type ChatServiceServer interface {
 	// replay, or the consumer falls behind; the client resubscribes from the
 	// last seq it received.
 	Subscribe(*SubscribeRequest, grpc.ServerStreamingServer[Message]) error
+	// Device registration and prekey bundles (S-22). RegisterDevice upserts
+	// the (user_id, device_id) bundle and its initial one-time prekeys;
+	// DeviceBundle fetches a bundle and consumes one of its one-time prekeys
+	// (S-23), deleted server-side so it is never handed out twice.
+	RegisterDevice(context.Context, *RegisterDeviceRequest) (*RegisterDeviceResponse, error)
+	DeviceBundle(context.Context, *DeviceBundleRequest) (*DeviceBundleResponse, error)
+	AddDevicePrekeys(context.Context, *AddDevicePrekeysRequest) (*AddDevicePrekeysResponse, error)
+	ListDevices(context.Context, *ListDevicesRequest) (*ListDevicesResponse, error)
 	mustEmbedUnimplementedChatServiceServer()
 }
 
@@ -171,6 +231,18 @@ func (UnimplementedChatServiceServer) PostMessage(context.Context, *PostMessageR
 }
 func (UnimplementedChatServiceServer) Subscribe(*SubscribeRequest, grpc.ServerStreamingServer[Message]) error {
 	return status.Error(codes.Unimplemented, "method Subscribe not implemented")
+}
+func (UnimplementedChatServiceServer) RegisterDevice(context.Context, *RegisterDeviceRequest) (*RegisterDeviceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterDevice not implemented")
+}
+func (UnimplementedChatServiceServer) DeviceBundle(context.Context, *DeviceBundleRequest) (*DeviceBundleResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeviceBundle not implemented")
+}
+func (UnimplementedChatServiceServer) AddDevicePrekeys(context.Context, *AddDevicePrekeysRequest) (*AddDevicePrekeysResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddDevicePrekeys not implemented")
+}
+func (UnimplementedChatServiceServer) ListDevices(context.Context, *ListDevicesRequest) (*ListDevicesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListDevices not implemented")
 }
 func (UnimplementedChatServiceServer) mustEmbedUnimplementedChatServiceServer() {}
 func (UnimplementedChatServiceServer) testEmbeddedByValue()                     {}
@@ -276,6 +348,78 @@ func _ChatService_Subscribe_Handler(srv interface{}, stream grpc.ServerStream) e
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ChatService_SubscribeServer = grpc.ServerStreamingServer[Message]
 
+func _ChatService_RegisterDevice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterDeviceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ChatServiceServer).RegisterDevice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ChatService_RegisterDevice_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ChatServiceServer).RegisterDevice(ctx, req.(*RegisterDeviceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ChatService_DeviceBundle_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeviceBundleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ChatServiceServer).DeviceBundle(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ChatService_DeviceBundle_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ChatServiceServer).DeviceBundle(ctx, req.(*DeviceBundleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ChatService_AddDevicePrekeys_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddDevicePrekeysRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ChatServiceServer).AddDevicePrekeys(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ChatService_AddDevicePrekeys_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ChatServiceServer).AddDevicePrekeys(ctx, req.(*AddDevicePrekeysRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ChatService_ListDevices_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListDevicesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ChatServiceServer).ListDevices(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ChatService_ListDevices_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ChatServiceServer).ListDevices(ctx, req.(*ListDevicesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ChatService_ServiceDesc is the grpc.ServiceDesc for ChatService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -298,6 +442,22 @@ var ChatService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PostMessage",
 			Handler:    _ChatService_PostMessage_Handler,
+		},
+		{
+			MethodName: "RegisterDevice",
+			Handler:    _ChatService_RegisterDevice_Handler,
+		},
+		{
+			MethodName: "DeviceBundle",
+			Handler:    _ChatService_DeviceBundle_Handler,
+		},
+		{
+			MethodName: "AddDevicePrekeys",
+			Handler:    _ChatService_AddDevicePrekeys_Handler,
+		},
+		{
+			MethodName: "ListDevices",
+			Handler:    _ChatService_ListDevices_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/lioneljmorrison/klacks/internal/core"
+	"github.com/lioneljmorrison/klacks/internal/store"
 )
 
 // RoomID identifies a room; UserID a user. Both are 16-byte UUIDs.
@@ -67,6 +68,16 @@ type Message struct {
 	CreatedAt  time.Time
 }
 
+// MemberRemoved is a membership-change event (S-29): User left Room,
+// removed by Actor (Actor == User when they left). E2EE clients use it to
+// rotate Sender Keys; embedders may also audit it. The event fires
+// synchronously after the removal commits, in commit order per room.
+type MemberRemoved struct {
+	Room  RoomID
+	User  UserID
+	Actor UserID
+}
+
 // Errors the service returns. They wrap the core's, so errors.Is matches
 // across both.
 var (
@@ -85,6 +96,11 @@ var (
 	ErrForbidden = core.ErrForbidden
 	// ErrPayloadTooLarge: the payload exceeds MaxPayloadSize.
 	ErrPayloadTooLarge = core.ErrPayloadTooLarge
+	// ErrDeviceNotFound: no registered device for the (user, device) pair.
+	ErrDeviceNotFound = store.ErrDeviceNotFound
+	// ErrInvalidBundle: the bundle or its keys are not usable. The server
+	// validates shapes only.
+	ErrInvalidBundle = store.ErrInvalidBundle
 )
 
 // ErrClosed: the service has been closed.

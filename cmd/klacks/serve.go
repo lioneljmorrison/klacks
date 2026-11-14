@@ -42,22 +42,24 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	var (
 		mgr       *ws.Manager
 		wsHandler http.Handler
+		devices   *httpapi.Devices
 	)
 	if a := clientAuthenticator(cfg.Env); a != nil {
 		rooms := store.NewRooms(pg, roomLockTimeout)
 		messages := store.NewScyllaMessages(scylla)
+		devices = httpapi.NewDevices(a, store.NewDevices(pg), log)
 		mgr = ws.NewManager(a, log)
 		// Fan-out goes through the manager: after each commit the core
 		// hands the message to the hub (S-13).
-		svc := core.New(rooms, messages, mgr.Deliver, nil)
+		svc := core.New(rooms, messages, mgr.Deliver, mgr.MemberRemoved)
 		mgr.Chat = svc
 		wsHandler = mgr
 		log.Warn("client auth is the dev stub: any claimed identity is trusted")
 	} else {
-		log.Warn("no client authenticator for this env; /ws is not served", "env", cfg.Env)
+		log.Warn("no client authenticator for this env; /ws and the prekey bundle API are not served", "env", cfg.Env)
 	}
 
-	srv := httpapi.NewServer(cfg.HTTP, health, wsHandler, log)
+	srv := httpapi.NewServer(cfg.HTTP, health, wsHandler, devices, log)
 	err = srv.ListenAndServe(ctx)
 	if mgr != nil {
 		// Shutdown does not track WebSockets: close them now that HTTP has

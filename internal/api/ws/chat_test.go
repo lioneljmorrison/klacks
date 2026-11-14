@@ -35,6 +35,9 @@ type fakeChat struct {
 	resumeMsgs []store.Message
 	resumeErr  error
 	before     func() // runs at the start of Resume, e.g. to fan out a live frame
+
+	members    []store.UUID
+	membersErr error
 }
 
 func (f *fakeChat) PostMessage(_ context.Context, room, sender store.UUID, p core.Payload) (int64, error) {
@@ -61,6 +64,12 @@ func (f *fakeChat) Hi(_ context.Context, _ store.UUID) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.hi, f.hiErr
+}
+
+func (f *fakeChat) Members(_ context.Context, _ store.UUID) ([]store.UUID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.members, f.membersErr
 }
 
 func (f *fakeChat) Resume(_ context.Context, _, _ store.UUID, lastSeen int64, deliver func(store.Message) error) (int64, error) {
@@ -127,6 +136,12 @@ func serverFrame(b []byte) (protocol.Frame, error) {
 	case protocol.TypeError:
 		e := new(protocol.Error)
 		return e, json.Unmarshal(b, e)
+	case protocol.TypeMemberRemoved:
+		e := new(protocol.MemberRemoved)
+		return e, json.Unmarshal(b, e)
+	case protocol.TypeMembers:
+		m := new(protocol.Members)
+		return m, json.Unmarshal(b, m)
 	}
 	return nil, fmt.Errorf("unexpected server frame type %q", env.Type)
 }
@@ -436,6 +451,7 @@ func TestResumeReplayThenLive(t *testing.T) {
 	frames := readFrames(c)
 
 	sendFrame(t, c, &protocol.Resume{RoomID: mustID(t, roomStr), LastSeenSeq: 0})
+	membersOf(t, next(t, frames, 5*time.Second)) // the members frame leads (S-29)
 	for seq := int64(1); seq <= 3; seq++ {
 		if d := deliverOf(t, next(t, frames, 5*time.Second)); d.Seq != seq {
 			t.Fatalf("deliver seq = %d; want %d", d.Seq, seq)
@@ -472,6 +488,7 @@ func TestResumeBuffersLiveDuringReplay(t *testing.T) {
 	frames := readFrames(c)
 
 	sendFrame(t, c, &protocol.Resume{RoomID: mustID(t, roomStr), LastSeenSeq: 0})
+	membersOf(t, next(t, frames, 5*time.Second)) // the members frame leads (S-29)
 	for seq := int64(1); seq <= 3; seq++ {
 		if d := deliverOf(t, next(t, frames, 5*time.Second)); d.Seq != seq {
 			t.Fatalf("deliver seq = %d; want %d", d.Seq, seq)
@@ -524,6 +541,7 @@ func TestAckPrunesReplayBuffer(t *testing.T) {
 	chat.resumeHi, chat.hi = 4, 4
 	chat.mu.Unlock()
 	sendFrame(t, c, &protocol.Resume{RoomID: mustID(t, roomStr), LastSeenSeq: 1})
+	membersOf(t, next(t, frames, 5*time.Second)) // the members frame leads (S-29)
 	deadline = time.Now().Add(5 * time.Second)
 	for chat.resumeCount() < 1 {
 		if time.Now().After(deadline) {
@@ -609,11 +627,13 @@ func TestResumeIdempotent(t *testing.T) {
 	frames := readFrames(c)
 
 	sendFrame(t, c, &protocol.Resume{RoomID: mustID(t, roomStr), LastSeenSeq: 0})
+	membersOf(t, next(t, frames, 5*time.Second)) // the members frame leads (S-29)
 	for seq := int64(1); seq <= 2; seq++ {
 		deliverOf(t, next(t, frames, 5*time.Second))
 	}
 	sendFrame(t, c, &protocol.Resume{RoomID: mustID(t, roomStr), LastSeenSeq: 0})
-	for seq := int64(1); seq <= 2; seq++ { // re-run from the client's cursor
+	membersOf(t, next(t, frames, 5*time.Second)) // the members frame leads (S-29)
+	for seq := int64(1); seq <= 2; seq++ {       // re-run from the client's cursor
 		deliverOf(t, next(t, frames, 5*time.Second))
 	}
 
@@ -623,4 +643,74 @@ func TestResumeIdempotent(t *testing.T) {
 	if subs != 1 {
 		t.Errorf("room has %d subscriptions; want 1", subs)
 	}
+}
+
+// --- S-29: membership events and the resume flow's members frame. ---
+
+// membersOf asserts v is a members frame and returns it.
+func membersOf(t *testing.T, v any) *protocol.Members {
+	t.Helper()
+	m, ok := v.(*protocol.Members)
+	if !ok {
+		t.Fatalf("got %T (%v); want a members frame", v, v)
+	}
+	return m
+}
+
+// memberRemovedOf asserts v is a member_removed frame and returns it.
+func memberRemovedOf(t *testing.T, v any) *protocol.MemberRemoved {
+	t.Helper()
+	e, ok := v.(*protocol.MemberRemoved)
+	if !ok {
+		t.Fatalf("got %T (%v); want a member_removed frame", v, v)
+	}
+	return e
+}
+
+// The resume flow leads with the room's current member list, before any
+// replayed message, so a returning client reconciles membership it missed
+// while offline (S-29).
+func TestResumeSendsMembers(t *testing.T) {
+	chat := &fakeChat{
+		members: []store.UUID{mustID(t, userStr), mustID(t, "b2000000-0000-0000-0000-000000000002")},
+	}
+	_, srv := newChatTestServer(t, chat, 0)
+	c := dial(t, srv)
+	frames := readFrames(c)
+
+	sendFrame(t, c, &protocol.Resume{RoomID: mustID(t, roomStr), LastSeenSeq: 0})
+	mf := membersOf(t, next(t, frames, 5*time.Second))
+	if mf.RoomID != mustID(t, roomStr) {
+		t.Fatalf("members room = %v; want %v", mf.RoomID, mustID(t, roomStr))
+	}
+	if len(mf.Members) != 2 {
+		t.Fatalf("members = %d; want 2", len(mf.Members))
+	}
+}
+
+// A member_removed event reaches every connection subscribed to the room,
+// and only those (S-29).
+func TestMemberRemovedFansToSubscribers(t *testing.T) {
+	room := testRoom(t)
+	chat := &fakeChat{}
+	m, srv := newChatTestServer(t, chat, 0)
+	a, b, out := dial(t, srv), dial(t, srv), dial(t, srv)
+	fa, fb, fo := readFrames(a), readFrames(b), readFrames(out)
+
+	for _, c := range []*websocket.Conn{a, b} {
+		sendFrame(t, c, &protocol.Subscribe{RoomID: mustID(t, roomStr)})
+	}
+	waitSubs(t, m, room, 2)
+
+	m.MemberRemoved(context.Background(), core.MemberRemoved{
+		Room: room, User: mustID(t, "b2000000-0000-0000-0000-000000000002"), Actor: mustID(t, userStr),
+	})
+	for name, ch := range map[string]<-chan any{"a": fa, "b": fb} {
+		e := memberRemovedOf(t, next(t, ch, 5*time.Second))
+		if e.RoomID != room {
+			t.Fatalf("%s: member_removed room = %v; want %v", name, e.RoomID, room)
+		}
+	}
+	// The unsubscribed connection gets nothing.
+	wantNothing(t, fo, 200*time.Millisecond)
 }
