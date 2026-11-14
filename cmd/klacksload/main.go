@@ -107,7 +107,9 @@ func main() {
 	flag.DurationVar(&c.duration, "duration", 30*time.Second, "measured steady phase")
 	flag.DurationVar(&c.warmup, "warmup", 5*time.Second, "unmeasured publishing before it")
 	flag.IntVar(&c.size, "size", 256, "ciphertext bytes per message")
-	flag.IntVar(&c.dialers, "dialers", 200, "concurrent dials while connecting")
+	// Under macOS's default listen backlog (kern.ipc.somaxconn = 128): at
+	// 200 concurrent dials a local server on macOS resets connections.
+	flag.IntVar(&c.dialers, "dialers", 100, "concurrent dials while connecting")
 	flag.StringVar(&c.runID, "run-id", "", "UUID naming this run's rooms and users (default: random); reuse it for -phase resume")
 	flag.StringVar(&c.phase, "phase", "load", "load: create rooms, connect, publish, resume; resume: only resume each room from 0 (run after restarting the server, so reads come from ScyllaDB, not the replay buffer)")
 	flag.DurationVar(&c.maxP99, "max-p99", 0, "load phase: fail (exit 1) if delivery p99 exceeds this; seq gaps, error frames, publish errors, slow-consumer disconnects, missing deliveries and unfinished resumes always fail (0: don't check p99)")
