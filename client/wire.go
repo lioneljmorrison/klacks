@@ -126,6 +126,10 @@ func (c *Client) readLoop() {
 		switch f := f.(type) {
 		case *protocol.Deliver:
 			c.handleDeliver(*f)
+		case *protocol.MemberRemoved:
+			c.handleMemberRemoved(f)
+		case *protocol.Members:
+			c.handleMembers(f)
 		case *protocol.Error:
 			select {
 			case <-c.done:
@@ -173,6 +177,18 @@ func decodeServerFrame(b []byte) (protocol.Frame, error) {
 			return nil, err
 		}
 		return &e, nil
+	case protocol.TypeMemberRemoved:
+		var e protocol.MemberRemoved
+		if err := json.Unmarshal(b, &e); err != nil {
+			return nil, err
+		}
+		return &e, nil
+	case protocol.TypeMembers:
+		var m protocol.Members
+		if err := json.Unmarshal(b, &m); err != nil {
+			return nil, err
+		}
+		return &m, nil
 	default:
 		return nil, fmt.Errorf("client: unexpected frame type %q", env.Type)
 	}
@@ -192,6 +208,7 @@ type deliver struct {
 // handleDeliver runs one deliver through the receive path: room ordering
 // first (the server's seq promise, verified independently of the AEAD),
 // then the recipient check, then the ratchet. The outcome lands on Inbox.
+// A room this device was removed from (S-29) is dropped unread.
 func (c *Client) handleDeliver(f protocol.Deliver) {
 	d := deliver{
 		Room:         [16]byte(f.RoomID),
@@ -201,6 +218,13 @@ func (c *Client) handleDeliver(f protocol.Deliver) {
 		MessageID:    [16]byte(f.MessageID),
 		Header:       f.Header,
 		Ciphertext:   f.Ciphertext,
+	}
+	c.mu.Lock()
+	rs, ok := c.rooms[d.Room]
+	removed := ok && rs.removed
+	c.mu.Unlock()
+	if removed {
+		return
 	}
 	redelivery, err := c.checkOrdering(d.Room, d.Seq, d.MessageID)
 	if err != nil {

@@ -51,7 +51,7 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		mgr = ws.NewManager(a, log)
 		// Fan-out goes through the manager: after each commit the core
 		// hands the message to the hub (S-13).
-		svc := core.New(rooms, messages, mgr.Deliver, nil)
+		svc := core.New(rooms, messages, mgr.Deliver, mgr.MemberRemoved)
 		mgr.Chat = svc
 		wsHandler = mgr
 		log.Warn("client auth is the dev stub: any claimed identity is trusted")

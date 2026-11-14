@@ -155,6 +155,38 @@ func (r *Rooms) Role(ctx context.Context, room, user UUID) (role string, ok bool
 	return role, true, nil
 }
 
+// Members returns the room's member user ids, in no particular order. It
+// returns ErrRoomNotFound if the room does not exist.
+func (r *Rooms) Members(ctx context.Context, room UUID) ([]UUID, error) {
+	rows, err := r.pool.Query(ctx, `SELECT user_id FROM room_members WHERE room_id = $1`, room)
+	if err != nil {
+		return nil, fmt.Errorf("rooms: members: %w", err)
+	}
+	defer rows.Close()
+	var out []UUID
+	for rows.Next() {
+		var u UUID
+		if err := rows.Scan(&u); err != nil {
+			return nil, fmt.Errorf("rooms: members: %w", err)
+		}
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rooms: members: %w", err)
+	}
+	if out == nil {
+		// No member rows: either the room is empty or there is no room.
+		// Distinguish for callers, which report the two differently.
+		var exists bool
+		if e := r.pool.QueryRow(ctx, `SELECT true FROM rooms WHERE id = $1`, room).Scan(&exists); errors.Is(e, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("rooms: %x: %w", room, ErrRoomNotFound)
+		} else if e != nil {
+			return nil, fmt.Errorf("rooms: exists: %w", e)
+		}
+	}
+	return out, nil
+}
+
 // Watermark returns the room's committed watermark hi: room_seq.next_seq - 1,
 // read with a plain SELECT, without FOR UPDATE (it does not guard a publish,
 // it only observes it). Every seq <= hi is in the message store; rows above

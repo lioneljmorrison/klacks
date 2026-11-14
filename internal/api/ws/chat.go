@@ -44,6 +44,10 @@ type Chat interface {
 	// The caller must be buffering live delivery before calling, and drops
 	// what it buffered at or below hi afterwards.
 	Resume(ctx context.Context, room, user store.UUID, lastSeenSeq int64, deliver func(store.Message) error) (int64, error)
+	// Members returns the room's member user ids: the resume flow leads
+	// with the list, so a returning client reconciles membership changes
+	// it was offline for (S-29).
+	Members(ctx context.Context, room store.UUID) ([]store.UUID, error)
 }
 
 var _ Chat = (*core.Service)(nil)
@@ -333,6 +337,15 @@ func (m *Manager) doResume(ctx context.Context, c *Conn, f *protocol.Resume, log
 		m.replyError(c, err, f, log)
 		return
 	}
+	// The resume flow leads with the room's current member list (S-29):
+	// the client reconciles membership it missed while offline before the
+	// replayed messages arrive.
+	members, err := m.Chat.Members(ctx, room)
+	if err != nil {
+		m.replyError(c, err, f, log)
+		return
+	}
+	m.enqueue(c, &protocol.Members{RoomID: f.RoomID, Members: memberIDs(members)})
 	sub := m.join(c, room)
 	gen := m.startReplay(sub)
 	hi, err := m.replayRoom(ctx, room, c.id.UserID, f.LastSeenSeq, func(msg store.Message) error {
@@ -344,6 +357,40 @@ func (m *Manager) doResume(ctx context.Context, c *Conn, f *protocol.Resume, log
 		return
 	}
 	m.drain(sub, gen, hi)
+}
+
+// memberIDs converts the core's member list for the wire.
+func memberIDs(members []store.UUID) []protocol.UUID {
+	out := make([]protocol.UUID, len(members))
+	for i, u := range members {
+		out[i] = protocol.UUID(u)
+	}
+	return out
+}
+
+// MemberRemoved fans a committed membership change out to the room's
+// subscribers (S-29): the core calls it synchronously after the removal
+// commits, and every subscriber gets a member_removed frame. It is safe
+// from any goroutine and, like Deliver, never blocks a caller. The event
+// is live-only — not replayed by resume; the members frame carries the
+// authoritative list there instead. The removed member, still subscribed
+// until its connection ends, receives the event too; its client clears
+// its state for the room.
+func (m *Manager) MemberRemoved(_ context.Context, ev core.MemberRemoved) {
+	m.hubMu.Lock()
+	defer m.hubMu.Unlock()
+	st := m.rooms[ev.Room]
+	if st == nil {
+		return
+	}
+	f := &protocol.MemberRemoved{
+		RoomID: protocol.UUID(ev.Room),
+		User:   protocol.UUID(ev.User),
+		Actor:  protocol.UUID(ev.Actor),
+	}
+	for _, sub := range st.subs {
+		m.enqueue(sub.conn, f)
+	}
 }
 
 // replayRoom streams (lastSeenSeq, hi] to deliver, trying the room's

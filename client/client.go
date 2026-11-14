@@ -51,6 +51,12 @@ type Client struct {
 	skPeers   map[skRef]*SenderKeys
 	skPending map[skRef][]deliver
 
+	// roomPeers (S-29) is this device's membership view per room, in
+	// devices: every other member device it distributes to, seeded by
+	// Distribute and Rotate, updated by removals and the members frame.
+	// The view is what rotation redistributes to.
+	roomPeers map[[16]byte][]Peer
+
 	// The WebSocket connection and its read loop.
 	conn       *websocket.Conn
 	readCtx    context.Context
@@ -95,6 +101,11 @@ type roomState struct {
 	// known message ids at any seq: a repeated id at a different seq is
 	// tampering (a row copied across the room's stream).
 	ids map[[16]byte]int64
+	// removed (S-29): this device was removed from the room. Everything
+	// the room still sends the connection — it stays subscribed until the
+	// server notices — is dropped unread: distributions must not install,
+	// or the removed member could re-enter a chain it no longer holds.
+	removed bool
 }
 
 // NewClient builds a client for a device, generating fresh key material
@@ -139,6 +150,7 @@ func newClientWithKeys(base string, user, device [16]byte, id IdentityKey, spk S
 		skOwn:      make(map[[16]byte]*SenderChain),
 		skPeers:    make(map[skRef]*SenderKeys),
 		skPending:  make(map[skRef][]deliver),
+		roomPeers:  make(map[[16]byte][]Peer),
 		httpc:      &http.Client{},
 		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Inbox:      make(chan Received, 1024),

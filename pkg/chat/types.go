@@ -68,6 +68,16 @@ type Message struct {
 	CreatedAt  time.Time
 }
 
+// MemberRemoved is a membership-change event (S-29): User left Room,
+// removed by Actor (Actor == User when they left). E2EE clients use it to
+// rotate Sender Keys; embedders may also audit it. The event fires
+// synchronously after the removal commits, in commit order per room.
+type MemberRemoved struct {
+	Room  RoomID
+	User  UserID
+	Actor UserID
+}
+
 // Errors the service returns. They wrap the core's, so errors.Is matches
 // across both.
 var (

@@ -66,7 +66,7 @@ func newE2EStack(t *testing.T) *e2eStack {
 	// so the buffer ages out immediately and resume always takes the
 	// database path.
 	m.ReplayWindow = time.Nanosecond
-	svc := core.New(rooms, msgs, m.Deliver, nil)
+	svc := core.New(rooms, msgs, m.Deliver, m.MemberRemoved)
 	m.Chat = svc
 
 	devices := store.NewDevices(pool)

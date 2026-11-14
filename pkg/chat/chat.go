@@ -87,6 +87,11 @@ type Config struct {
 	// DefaultSendQueue.
 	SendQueue int
 
+	// OnMemberRemoved, when set, receives every membership removal
+	// (S-29): synchronously after the removal commits, in commit order
+	// per room. It must not block. Nil discards the events.
+	OnMemberRemoved func(ctx context.Context, ev MemberRemoved)
+
 	// Log receives diagnostics, such as closed slow consumers. Nil discards.
 	Log *slog.Logger
 }
@@ -162,7 +167,13 @@ func Open(ctx context.Context, cfg Config) (*Service, error) {
 		devices: store.NewDevices(pool),
 		hub:     make(map[[16]byte]map[*subscription]struct{}),
 	}
-	s.core = core.New(store.NewRooms(pool, cfg.RoomLockTimeout), store.NewScyllaMessages(sc), s.Deliver, nil)
+	var onRemoved func(context.Context, core.MemberRemoved)
+	if cfg.OnMemberRemoved != nil {
+		onRemoved = func(ctx context.Context, ev core.MemberRemoved) {
+			cfg.OnMemberRemoved(ctx, MemberRemoved{Room: RoomID(ev.Room), User: UserID(ev.User), Actor: UserID(ev.Actor)})
+		}
+	}
+	s.core = core.New(store.NewRooms(pool, cfg.RoomLockTimeout), store.NewScyllaMessages(sc), s.Deliver, onRemoved)
 	return s, nil
 }
 

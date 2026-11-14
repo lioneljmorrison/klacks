@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -355,4 +356,42 @@ func TestCloseStopsSubscriptions(t *testing.T) {
 		t.Errorf("subscribe after close: err = %v, want ErrClosed", err)
 	}
 	svc.Close() // idempotent
+}
+
+// OnMemberRemoved receives every removal, in commit order (S-29), which is
+// the hook an E2EE client's rotation logic hangs off.
+func TestOnMemberRemoved(t *testing.T) {
+	var mu sync.Mutex
+	var got []chat.MemberRemoved
+	svc, _ := openChat(t, func(c *chat.Config) {
+		c.OnMemberRemoved = func(_ context.Context, ev chat.MemberRemoved) {
+			mu.Lock()
+			got = append(got, ev)
+			mu.Unlock()
+		}
+	})
+	ctx := context.Background()
+	room, err := svc.CreateRoom(ctx, chat.RoomSpec{Kind: chat.KindGroup})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob := chat.UserID{15: 0xb0}
+	if err := svc.AddMember(ctx, room, bob, chat.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RemoveMember(ctx, room, bob); err != nil {
+		t.Fatal(err)
+	}
+	// A failed removal emits nothing.
+	if err := svc.RemoveMember(ctx, room, bob); !errors.Is(err, chat.ErrMemberNotFound) {
+		t.Fatalf("second removal: err = %v, want ErrMemberNotFound", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("events = %+v, want one removal of bob", got)
+	}
+	if e := got[0]; e.Room != room || e.User != bob || e.Actor != actor {
+		t.Fatalf("event = %+v, want bob removed by the actor from %v", e, room)
+	}
 }

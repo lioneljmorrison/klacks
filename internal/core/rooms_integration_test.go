@@ -31,6 +31,57 @@ func newService(t *testing.T, onRemoved func(context.Context, core.MemberRemoved
 	return core.New(store.NewRooms(dbtest.MigratedPostgres(t), 10*time.Second), nil, nil, onRemoved)
 }
 
+// TestMembers lists the room's current member users: after removals the
+// removed users are gone, which is what the resume flow's members frame
+// carries (S-29).
+func TestMembers(t *testing.T) {
+	svc := newService(t, nil)
+	ctx := context.Background()
+	room, err := svc.CreateRoom(ctx, core.KindGroup, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []store.UUID{alice, bob} {
+		if err := svc.AddMember(ctx, room, owner, u, core.RoleMember); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := svc.Members(ctx, room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("members = %d users, want 3 (owner, alice, bob)", len(got))
+	}
+	seen := map[store.UUID]bool{}
+	for _, u := range got {
+		seen[u] = true
+	}
+	for _, u := range []store.UUID{owner, alice, bob} {
+		if !seen[u] {
+			t.Fatalf("member %x missing from %v", u, got)
+		}
+	}
+	if err := svc.RemoveMember(ctx, room, owner, bob); err != nil {
+		t.Fatal(err)
+	}
+	got, err = svc.Members(ctx, room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("members after removal = %d users, want 2", len(got))
+	}
+	for _, u := range got {
+		if u == bob {
+			t.Fatal("removed member still listed")
+		}
+	}
+	if _, err := svc.Members(ctx, id(0xee)); !errors.Is(err, core.ErrRoomNotFound) {
+		t.Fatalf("missing room: err = %v, want ErrRoomNotFound", err)
+	}
+}
+
 func TestCreateRoomKinds(t *testing.T) {
 	svc := newService(t, nil)
 	ctx := context.Background()

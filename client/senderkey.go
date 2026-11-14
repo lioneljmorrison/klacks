@@ -43,6 +43,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"time"
+
+	"github.com/lioneljmorrison/klacks/internal/protocol"
 )
 
 const (
@@ -604,8 +607,16 @@ func (c *Client) rotateOwn(room [16]byte) error {
 // Distribute makes this device's sender key for the room known to every
 // peer device listed, pairwise over their existing Double Ratchet
 // sessions, creating the chain first when there is none (S-27). Peers are
-// every other member device of the room.
+// every other member device of the room; they become this device's
+// membership view for rotation (S-29).
 func (c *Client) Distribute(ctx context.Context, room [16]byte, peers []Peer) error {
+	c.setRoomPeers(room, peers)
+	return c.distribute(ctx, room, peers)
+}
+
+// distribute seals and publishes this device's distribution to each peer
+// device listed.
+func (c *Client) distribute(ctx context.Context, room [16]byte, peers []Peer) error {
 	for _, p := range peers {
 		e, err := c.sealDistribution(ctx, room, p)
 		if err != nil {
@@ -620,12 +631,145 @@ func (c *Client) Distribute(ctx context.Context, room [16]byte, peers []Peer) er
 
 // Rotate replaces this device's sender key for the room with a fresh one
 // and redistributes it to every peer device listed (S-29's rotation, on a
-// membership change).
+// membership change). The listed peers become the room's membership view.
 func (c *Client) Rotate(ctx context.Context, room [16]byte, peers []Peer) error {
 	if err := c.rotateOwn(room); err != nil {
 		return err
 	}
-	return c.Distribute(ctx, room, peers)
+	c.setRoomPeers(room, peers)
+	return c.distribute(ctx, room, peers)
+}
+
+// setRoomPeers records the room's member devices, replacing any earlier
+// view: the caller's list is the room's full other-member device set.
+func (c *Client) setRoomPeers(room [16]byte, peers []Peer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.roomPeers[room] = append([]Peer(nil), peers...)
+}
+
+// roomPeersFor returns a copy of the room's membership view.
+func (c *Client) roomPeersFor(room [16]byte) ([]Peer, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	peers, ok := c.roomPeers[room]
+	return append([]Peer(nil), peers...), ok
+}
+
+// markRoomRemoved flags the room closed to this device and drops its
+// sender-key state: chains this device generated or installed belong to a
+// room it is no longer in.
+func (c *Client) markRoomRemoved(room [16]byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.skOwn, room)
+	for k := range c.skPeers {
+		if k.room == room {
+			delete(c.skPeers, k)
+		}
+	}
+	for k := range c.skPending {
+		if k.room == room {
+			delete(c.skPending, k)
+		}
+	}
+	delete(c.roomPeers, room)
+	if rs, ok := c.rooms[room]; ok {
+		rs.removed = true
+		return
+	}
+	c.rooms[room] = &roomState{
+		seen:    make(map[int64][16]byte),
+		ids:     make(map[[16]byte]int64),
+		removed: true,
+	}
+}
+
+// handleMemberRemoved processes a member_removed frame (S-29): own removal
+// closes the room to this device; another member's removal rotates this
+// device's chain and redistributes it to the members that remain.
+func (c *Client) handleMemberRemoved(f *protocol.MemberRemoved) {
+	room := [16]byte(f.RoomID)
+	if user := [16]byte(f.User); user == c.user {
+		c.markRoomRemoved(room)
+		return
+	}
+	c.rotateForGone(room, [16]byte(f.User))
+}
+
+// handleMembers reconciles the room's member list, which the resume flow
+// leads with (S-29), against this device's view. Self absent: the room is
+// closed to this device. Others absent: one rotation for the whole
+// difference — the list is authoritative, not a sequence of events.
+func (c *Client) handleMembers(f *protocol.Members) {
+	room := [16]byte(f.RoomID)
+	peers, ok := c.roomPeersFor(room)
+	if !ok {
+		return // this device never joined the room's distribution
+	}
+	known := make(map[[16]byte]bool, len(f.Members))
+	for _, u := range f.Members {
+		known[[16]byte(u)] = true
+	}
+	if !known[c.user] {
+		c.markRoomRemoved(room)
+		return
+	}
+	gone := make(map[[16]byte]bool)
+	remaining := make([]Peer, 0, len(peers))
+	for _, p := range peers {
+		if !known[p.User] {
+			gone[p.User] = true
+			continue
+		}
+		remaining = append(remaining, p)
+	}
+	if len(gone) == 0 {
+		return
+	}
+	c.setRoomPeers(room, remaining)
+	c.rotateAndRedistribute(room, remaining, len(gone))
+}
+
+// rotateForGone updates the view for one removed member and rotates.
+func (c *Client) rotateForGone(room, gone [16]byte) {
+	peers, ok := c.roomPeersFor(room)
+	if !ok {
+		return // this device never joined the room's distribution
+	}
+	remaining := make([]Peer, 0, len(peers))
+	for _, p := range peers {
+		if p.User != gone {
+			remaining = append(remaining, p)
+		}
+	}
+	if len(remaining) == len(peers) {
+		return // someone this device does not know is gone; nothing to do
+	}
+	c.setRoomPeers(room, remaining)
+	c.rotateAndRedistribute(room, remaining, 1)
+}
+
+// rotateAndRedistribute replaces this device's chain and redistributes it
+// to remaining. Failures surface on Errs: a rotation that cannot publish
+// leaves the room's messages decryptable by the removed member until the
+// next rotation.
+func (c *Client) rotateAndRedistribute(room [16]byte, remaining []Peer, gone int) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := c.rotateOwn(room); err != nil {
+		select {
+		case <-c.done:
+		case c.Errs <- fmt.Errorf("rotate after %d removal(s): %w", gone, err):
+		}
+		return
+	}
+	if err := c.distribute(ctx, room, remaining); err != nil {
+		select {
+		case <-c.done:
+		case c.Errs <- fmt.Errorf("redistribute after %d removal(s): %w", gone, err):
+		}
+	}
 }
 
 // SendGroup encrypts plaintext once under this device's sender key and

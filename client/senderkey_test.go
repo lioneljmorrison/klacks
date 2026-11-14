@@ -11,7 +11,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/lioneljmorrison/klacks/internal/protocol"
 )
 
 // sameSenderKey compares two distribution payloads field by field (the
@@ -548,7 +552,7 @@ func TestGroupRotationLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	alice.rotateOwn(room)
+	alice.rotateOwn(room) //nolint:errcheck // the test asserts the chain changed below
 	if alice.skOwn[room] == oldChain {
 		t.Fatal("rotateOwn did not replace the chain")
 	}
@@ -569,5 +573,205 @@ func TestGroupRotationLoopback(t *testing.T) {
 	bob.handleDeliver(deliverOf(room, 5, alice, eLate))
 	if r := inbox(t, bob); r.Err != nil || string(r.Plaintext) != "late from old" {
 		t.Fatalf("late old-chain message: %+v", r)
+	}
+}
+
+// --- S-29: rotation on member removal. ---
+
+// TestSelfRemovalClosesRoom: a device told it was removed drops its
+// sender-key state for the room and drops everything the room still sends
+// its (still live) connection: distributions must not install, and group
+// messages are not even stashed.
+func TestSelfRemovalClosesRoom(t *testing.T) {
+	base := restDevices(t)
+	ctx := context.Background()
+	alice, err := NewClient(base, [16]byte{1}, [16]byte{0xA1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := NewClient(base, [16]byte{2}, [16]byte{0xB1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []*Client{alice, bob} {
+		if err := c.Register(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	room := [16]byte{9}
+	peerBob := Peer{User: bob.user, Device: bob.device}
+	peerAlice := Peer{User: alice.user, Device: alice.device}
+
+	da, err := alice.sealDistribution(ctx, room, peerBob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := bob.sealDistribution(ctx, room, peerAlice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob.handleDeliver(deliverOf(room, 1, alice, da))
+	alice.handleDeliver(deliverOf(room, 2, bob, db))
+
+	// Alice is removed.
+	alice.handleMemberRemoved(&protocol.MemberRemoved{
+		RoomID: protocol.UUID(room), User: protocol.UUID(alice.user), Actor: protocol.UUID(bob.user),
+	})
+	if chain := alice.skOwn[room]; chain != nil {
+		t.Fatal("removed device kept its own chain")
+	}
+	if _, ok := alice.skPeers[skRef{room: room, device: bob.device}]; ok {
+		t.Fatal("removed device kept the peer's chain")
+	}
+
+	// The room's stream keeps arriving: a distribution does not install,
+	// and a group message is neither decrypted nor stashed.
+	bob.handleDeliver(deliverOf(room, 3, bob, db)) // bob's echo: silent either way
+	g, err := bob.sealGroup(room, []byte("after removal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice.handleDeliver(deliverOf(room, 4, bob, g))
+	select {
+	case r := <-alice.Inbox:
+		t.Fatalf("removed device processed a group message: %+v", r)
+	default:
+	}
+	if n := len(alice.skPending[skRef{room: room, device: bob.device}]); n != 0 {
+		t.Fatalf("removed device stashed %d messages", n)
+	}
+	d2, err := bob.sealDistribution(ctx, room, peerAlice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice.handleDeliver(deliverOf(room, 5, bob, d2))
+	if _, ok := alice.skPeers[skRef{room: room, device: bob.device}]; ok {
+		t.Fatal("removed device installed a fresh distribution")
+	}
+}
+
+// TestRemovalTriggersRotation: on another member's removal the device
+// rotates its chain, updates its view, and redistributes to those that
+// remain — which in the loopback fails at publish (no connection), a
+// failure that surfaces on Errs.
+func TestRemovalTriggersRotation(t *testing.T) {
+	base := restDevices(t)
+	ctx := context.Background()
+	alice, err := NewClient(base, [16]byte{1}, [16]byte{0xA1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := NewClient(base, [16]byte{2}, [16]byte{0xB1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	carol, err := NewClient(base, [16]byte{3}, [16]byte{0xC1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []*Client{alice, bob, carol} {
+		if err := c.Register(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	room := [16]byte{9}
+	peerBob := Peer{User: bob.user, Device: bob.device}
+	peerCarol := Peer{User: carol.user, Device: carol.device}
+
+	da1, err := alice.sealDistribution(ctx, room, peerBob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	da2, err := alice.sealDistribution(ctx, room, peerCarol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob.handleDeliver(deliverOf(room, 1, alice, da1))
+	carol.handleDeliver(deliverOf(room, 1, alice, da2))
+	// Distribute seeds the view; in the loopback the publish half fails,
+	// so the view is set directly the way a real run would leave it.
+	alice.setRoomPeers(room, []Peer{peerBob, peerCarol})
+	oldChain := alice.skOwn[room]
+
+	// Bob is removed; alice rotates and redistributes to carol.
+	alice.handleMemberRemoved(&protocol.MemberRemoved{
+		RoomID: protocol.UUID(room), User: protocol.UUID(bob.user), Actor: protocol.UUID(carol.user),
+	})
+	if alice.skOwn[room] == oldChain {
+		t.Fatal("member removal did not rotate the chain")
+	}
+	view, _ := alice.roomPeersFor(room)
+	if len(view) != 1 || view[0].Device != carol.device {
+		t.Fatalf("view after removal = %+v; want only carol", view)
+	}
+	// The redistribution's publish fails with no connection: Errs says so.
+	select {
+	case err := <-alice.Errs:
+		if err == nil || !strings.Contains(err.Error(), "redistribute") {
+			t.Fatalf("Errs = %v; want the redistribute failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("redistribution failure never surfaced on Errs")
+	}
+}
+
+// TestMembersFrameReconcile: the resume flow's member list is
+// authoritative — every tracked member absent from it triggers one
+// rotation for the whole difference, and an absent self closes the room.
+func TestMembersFrameReconcile(t *testing.T) {
+	base := restDevices(t)
+	ctx := context.Background()
+	alice, err := NewClient(base, [16]byte{1}, [16]byte{0xA1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := NewClient(base, [16]byte{2}, [16]byte{0xB1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	carol, err := NewClient(base, [16]byte{3}, [16]byte{0xC1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []*Client{alice, bob, carol} {
+		if err := c.Register(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	room := [16]byte{9}
+	peerBob := Peer{User: bob.user, Device: bob.device}
+	peerCarol := Peer{User: carol.user, Device: carol.device}
+
+	da1, err := alice.sealDistribution(ctx, room, peerBob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	da2, err := alice.sealDistribution(ctx, room, peerCarol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob.handleDeliver(deliverOf(room, 1, alice, da1))
+	carol.handleDeliver(deliverOf(room, 1, alice, da2))
+	alice.setRoomPeers(room, []Peer{peerBob, peerCarol})
+	oldChain := alice.skOwn[room]
+
+	// While alice was offline both bob and carol were removed.
+	alice.handleMembers(&protocol.Members{
+		RoomID:  protocol.UUID(room),
+		Members: []protocol.UUID{protocol.UUID(alice.user)},
+	})
+	if alice.skOwn[room] == oldChain {
+		t.Fatal("member-list difference did not rotate the chain")
+	}
+	view, _ := alice.roomPeersFor(room)
+	if len(view) != 0 {
+		t.Fatalf("view after both peers removed = %+v; want empty", view)
+	}
+	// And one rotation is one distribution attempt per remaining peer:
+	// none remain, so the only Err is nothing at all.
+	select {
+	case err := <-alice.Errs:
+		t.Fatalf("unexpected Errs entry: %v", err)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

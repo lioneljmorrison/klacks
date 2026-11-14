@@ -91,6 +91,8 @@ v1 — delivery itself is the confirmation.
 
 **resume**: deliver every message in the room with `seq > last_seen_seq`,
 then continue live. `last_seen_seq` is `0` to start from the beginning.
+The flow leads with a [`members`](#members) frame (S-29): the room's
+current member list, before any replayed message.
 
 ```json
 {"v":1, "type":"resume", "room_id":"…", "last_seen_seq":41}
@@ -127,6 +129,28 @@ data, so they are always present.
 ```
 
 `header` is omitted when empty.
+
+**member_removed**: a member left the room (S-29). Sent live to every
+connection subscribed to the room, including the removed member's (which
+stops processing the room when it sees itself). Never replayed by resume:
+the resume flow's `members` frame carries the authoritative list instead,
+so a client that was offline during the removal reconciles there.
+
+```json
+{"v":1, "type":"member_removed", "room_id":"…", "user":"…", "actor":"…"}
+```
+
+`actor` removed `user`; `actor == user` when a member left.
+
+**members**: a room's current member list, sent as part of the resume
+flow (S-29), before the replayed messages. A returning client diffs it
+against the members it knows and reconciles the difference — every member
+it knows that is absent triggers the same Sender Key rotation a live
+`member_removed` would.
+
+```json
+{"v":1, "type":"members", "room_id":"…", "members":["…","…"]}
+```
 
 **error**: a request failed. `room_id` and `message_id` name the request
 it answers when the server knows them (`message_id` for a publish).
