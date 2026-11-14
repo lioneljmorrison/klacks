@@ -506,6 +506,11 @@ func (m *Manager) doPublish(ctx context.Context, c *Conn, f *protocol.Publish, l
 		Ciphertext: f.Ciphertext,
 		Header:     f.Header,
 	}
+	if m.PublishTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, m.PublishTimeout)
+		defer cancel()
+	}
 	if _, err := m.Chat.PostMessage(ctx, store.UUID(f.RoomID), c.id.UserID, p); err != nil {
 		m.replyError(c, err, f, log)
 	}

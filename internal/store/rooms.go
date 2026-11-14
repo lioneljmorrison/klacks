@@ -43,14 +43,31 @@ type Rooms struct {
 // lock across its ScyllaDB write, during which the Postgres session is idle in
 // transaction; a shorter timeout would kill a live publish. The idle timeout
 // also releases the lock if a process hangs while holding it.
+//
+// lockTimeout also bounds each call that does not take the room lock
+// (CreateRoom, CreateRoomWithID, Role, Members, Watermark) as a client-side
+// deadline (S-47): those server-side timeouts are useless against a
+// partitioned PostgreSQL, which never answers, so without it a call hangs
+// until its caller goes away. 0 disables every one of these timeouts.
 func NewRooms(pool *pgxpool.Pool, lockTimeout time.Duration) *Rooms {
 	return &Rooms{pool: pool, lockTimeout: lockTimeout}
+}
+
+// bounded returns ctx with the per-call deadline for calls that do not take
+// the room lock (see NewRooms).
+func (r *Rooms) bounded(ctx context.Context) (context.Context, context.CancelFunc) {
+	if r.lockTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, r.lockTimeout)
 }
 
 // CreateRoom creates a room of the given kind with a generated ID, its
 // room_seq counter, and owner as its first member with ownerRole, in one
 // transaction.
 func (r *Rooms) CreateRoom(ctx context.Context, kind string, owner UUID, ownerRole string) (UUID, error) {
+	ctx, cancel := r.bounded(ctx)
+	defer cancel()
 	var room UUID
 	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `INSERT INTO rooms (id, kind) VALUES (gen_random_uuid(), $1) RETURNING id`, kind).Scan(&room); err != nil {
@@ -69,6 +86,8 @@ func (r *Rooms) CreateRoom(ctx context.Context, kind string, owner UUID, ownerRo
 // exists fails with the driver's unique-violation error, which the caller
 // surfaces as "already exists".
 func (r *Rooms) CreateRoomWithID(ctx context.Context, room UUID, kind string, owner UUID, ownerRole string) error {
+	ctx, cancel := r.bounded(ctx)
+	defer cancel()
 	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO rooms (id, kind) VALUES ($1, $2)`, room, kind); err != nil {
 			return err
@@ -171,6 +190,8 @@ func (l *LockedRoom) RemoveMember(ctx context.Context, user UUID) error {
 // if user is not a member. It returns ErrRoomNotFound if the room does not
 // exist.
 func (r *Rooms) Role(ctx context.Context, room, user UUID) (role string, ok bool, err error) {
+	ctx, cancel := r.bounded(ctx)
+	defer cancel()
 	err = r.pool.QueryRow(ctx, `SELECT role FROM room_members WHERE room_id = $1 AND user_id = $2`, room, user).Scan(&role)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// No member row: either user is not a member or there is no room.
@@ -192,6 +213,8 @@ func (r *Rooms) Role(ctx context.Context, room, user UUID) (role string, ok bool
 // Members returns the room's member user ids, in no particular order. It
 // returns ErrRoomNotFound if the room does not exist.
 func (r *Rooms) Members(ctx context.Context, room UUID) ([]UUID, error) {
+	ctx, cancel := r.bounded(ctx)
+	defer cancel()
 	rows, err := r.pool.Query(ctx, `SELECT user_id FROM room_members WHERE room_id = $1`, room)
 	if err != nil {
 		return nil, fmt.Errorf("rooms: members: %w", err)
@@ -226,6 +249,8 @@ func (r *Rooms) Members(ctx context.Context, room UUID) ([]UUID, error) {
 // it only observes it). Every seq <= hi is in the message store; rows above
 // hi may be uncommitted orphans and must never be served.
 func (r *Rooms) Watermark(ctx context.Context, room UUID) (int64, error) {
+	ctx, cancel := r.bounded(ctx)
+	defer cancel()
 	var next int64
 	err := r.pool.QueryRow(ctx, `SELECT next_seq FROM room_seq WHERE room_id = $1`, room).Scan(&next)
 	if errors.Is(err, pgx.ErrNoRows) {

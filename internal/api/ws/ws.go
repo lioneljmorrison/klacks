@@ -66,6 +66,12 @@ type Manager struct {
 	ReplayWindow  time.Duration
 	ReplayEntries int
 
+	// PublishTimeout bounds each publish, from the frame to its reply (S-47):
+	// a partitioned store never answers, and the server-side lock and
+	// statement timeouts cannot fire without it. Size it to the room lock
+	// timeout plus the ScyllaDB write timeout. 0 means no deadline.
+	PublishTimeout time.Duration
+
 	// OriginPatterns are the cross-origin hosts allowed to upgrade
 	// (websocket.AcceptOptions.OriginPatterns, S-43). Empty keeps the
 	// same-origin check. Set it only with an authenticator whose credential
