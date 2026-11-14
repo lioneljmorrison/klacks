@@ -68,9 +68,31 @@ type Message struct {
 	CreatedAt  time.Time
 }
 
+// AuditAction names a membership change in the audit log.
+type AuditAction string
+
+// Audit actions.
+const (
+	AuditRoomCreated   AuditAction = store.AuditRoomCreated   // the creator became owner
+	AuditMemberAdded   AuditAction = store.AuditMemberAdded   // Target was added with Role
+	AuditMemberRemoved AuditAction = store.AuditMemberRemoved // Target, holding Role, was removed (Actor == Target: left)
+)
+
+// AuditEvent is one committed membership change (S-33). It never carries
+// message content. ID orders a room's events and is the paging cursor.
+type AuditEvent struct {
+	ID     int64
+	Room   RoomID
+	Action AuditAction
+	Actor  UserID
+	Target UserID
+	Role   Role
+	At     time.Time
+}
+
 // MemberRemoved is a membership-change event (S-29): User left Room,
 // removed by Actor (Actor == User when they left). E2EE clients use it to
-// rotate Sender Keys; embedders may also audit it. The event fires
+// rotate Sender Keys. For a durable record use AuditLog. The event fires
 // synchronously after the removal commits, in commit order per room.
 type MemberRemoved struct {
 	Room  RoomID

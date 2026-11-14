@@ -77,8 +77,10 @@ func createRoomSeqAndMember(ctx context.Context, tx pgx.Tx, room UUID, owner UUI
 	if _, err := tx.Exec(ctx, `INSERT INTO room_seq (room_id) VALUES ($1)`, room); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO room_members (room_id, user_id, role) VALUES ($1, $2, $3)`, room, owner, ownerRole)
-	return err
+	if _, err := tx.Exec(ctx, `INSERT INTO room_members (room_id, user_id, role) VALUES ($1, $2, $3)`, room, owner, ownerRole); err != nil {
+		return err
+	}
+	return audit(ctx, tx, room, AuditRoomCreated, owner, owner, ownerRole)
 }
 
 // Locked runs fn in a transaction that holds the room's room_seq row
@@ -127,9 +129,10 @@ func (l *LockedRoom) Role(ctx context.Context, user UUID) (role string, ok bool,
 	return role, true, nil
 }
 
-// AddMember adds user with role. It returns ErrAlreadyMember if user is a
-// member already.
-func (l *LockedRoom) AddMember(ctx context.Context, user UUID, role string) error {
+// AddMember adds user with role on actor's behalf and records the change in
+// the audit log, in the same transaction. It returns ErrAlreadyMember if
+// user is a member already.
+func (l *LockedRoom) AddMember(ctx context.Context, actor, user UUID, role string) error {
 	_, err := l.tx.Exec(ctx, `INSERT INTO room_members (room_id, user_id, role) VALUES ($1, $2, $3)`, l.room, user, role)
 	if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
 		return fmt.Errorf("rooms: add member: %w", ErrAlreadyMember)
@@ -137,19 +140,22 @@ func (l *LockedRoom) AddMember(ctx context.Context, user UUID, role string) erro
 	if err != nil {
 		return fmt.Errorf("rooms: add member: %w", err)
 	}
-	return nil
+	return audit(ctx, l.tx, l.room, AuditMemberAdded, actor, user, role)
 }
 
-// RemoveMember removes user. It returns ErrMemberNotFound if user is not a member.
-func (l *LockedRoom) RemoveMember(ctx context.Context, user UUID) error {
-	tag, err := l.tx.Exec(ctx, `DELETE FROM room_members WHERE room_id = $1 AND user_id = $2`, l.room, user)
+// RemoveMember removes user on actor's behalf and records the change, with
+// the role user held, in the audit log, in the same transaction. It returns
+// ErrMemberNotFound if user is not a member.
+func (l *LockedRoom) RemoveMember(ctx context.Context, actor, user UUID) error {
+	var role string
+	err := l.tx.QueryRow(ctx, `DELETE FROM room_members WHERE room_id = $1 AND user_id = $2 RETURNING role`, l.room, user).Scan(&role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("rooms: remove member: %w", ErrMemberNotFound)
+	}
 	if err != nil {
 		return fmt.Errorf("rooms: remove member: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("rooms: remove member: %w", ErrMemberNotFound)
-	}
-	return nil
+	return audit(ctx, l.tx, l.room, AuditMemberRemoved, actor, user, role)
 }
 
 // Role returns user's role in room without taking the room lock: a plain
