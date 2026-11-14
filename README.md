@@ -167,3 +167,18 @@ pkg/chat             the public, importable ChatService
   503 otherwise. On shutdown it reports `draining` for `KLACKS_HTTP_DRAIN_DELAY`
   (default 0) before the listener closes, so load balancers can stop routing
   traffic. In-flight requests then get `KLACKS_HTTP_SHUTDOWN_TIMEOUT` to finish.
+
+## License
+
+klacks is licensed under the [Apache License 2.0](LICENSE). That is a
+permissive license, so you can embed `pkg/chat` in closed-source projects;
+it also includes an explicit patent grant. All direct dependencies are
+under compatible permissive licenses (Apache-2.0, MIT, BSD, ISC). Client
+apps that use libsignal take on its AGPL-3.0 license; see
+[docs/protocol.md](docs/protocol.md).
+
+If you run klacks as a service for other people, start from the privacy
+policy and terms of service templates in [docs/legal](docs/legal/). They
+describe what a klacks server stores (ciphertext and routing metadata,
+never message content). They are templates, not legal advice: have them
+reviewed before you publish them.
