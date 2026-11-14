@@ -361,3 +361,61 @@ func TestSeenLog(t *testing.T) {
 		t.Errorf("restored state lacks the logged seen entries: %s", full)
 	}
 }
+
+// S-49: after a crash leaves a torn last line in the seen log, the next
+// start drops it, so later appends begin on a fresh line and every start
+// after that still restores.
+func TestSeenLogTornLineThenSave(t *testing.T) {
+	a, _ := testApp(t)
+	a.device = [16]byte{2}
+	var err error
+	if a.c, err = clientFromKeys("http://test.invalid", a.user, a.device, a.keys); err != nil {
+		t.Fatal(err)
+	}
+	room1 := `{"room":[9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"started":true,"last_seq":1,"seen":[{"seq":1,"id":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}]}`
+	room2 := `{"room":[8,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"started":true,"last_seq":1,"seen":[{"seq":1,"id":[2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}]}`
+	if err := a.c.RestoreState([]byte(`{"v":2,"rooms":[` + room1 + `]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.saveState(); err != nil {
+		t.Fatal(err)
+	}
+	// A crash mid-append: a fragment without its newline.
+	f, err := os.OpenFile(seenLogPath(a.keyPath), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"room":[9,0`)
+	_ = f.Close()
+
+	// Restart, record something new, save, restart again.
+	restartApp := func() {
+		t.Helper()
+		if a.c, err = clientFromKeys("http://test.invalid", a.user, a.device, a.keys); err != nil {
+			t.Fatal(err)
+		}
+		if err := restoreSessions(a.c, a.keyPath); err != nil {
+			t.Fatalf("restore: %v", err)
+		}
+	}
+	restartApp()
+	state, _, err := a.c.MarshalStateIncremental()
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged := strings.Replace(string(state), `"rooms":[`, `"rooms":[`+room2+`,`, 1)
+	if err := a.c.RestoreState([]byte(merged)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.saveState(); err != nil {
+		t.Fatal(err)
+	}
+	restartApp()
+	full, err := a.c.MarshalState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(full), `"id":[2,0`) {
+		t.Errorf("entry saved after the torn line was lost: %s", full)
+	}
+}

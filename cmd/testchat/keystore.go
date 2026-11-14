@@ -130,9 +130,13 @@ func seenLogPath(keyPath string) string {
 }
 
 // restoreSessions loads the saved client state into c, then the seen log;
-// none saved (a first run, or -fresh) is not an error. A torn last line,
-// from a crash mid-append, is skipped: its entry is offered to the log
-// again by the next save, since the state written after it never was.
+// none saved (a first run, or -fresh) is not an error. A log that does not
+// end in a newline was torn by a crash mid-append: it is truncated back to
+// its last newline before anything is appended, so later appends start on
+// a line of their own. The dropped entries were logged before a state
+// that was never written, so they are recorded again when their seqs are
+// redelivered. This runs at startup, under the device lock, before any
+// save.
 func restoreSessions(c *client.Client, keyPath string) error {
 	b, err := os.ReadFile(sessionsPath(keyPath)) //nolint:gosec // derived from the device identity, not user input
 	if errors.Is(err, os.ErrNotExist) {
@@ -151,6 +155,12 @@ func restoreSessions(c *client.Client, keyPath string) error {
 	if err != nil {
 		return err
 	}
+	if n := bytes.LastIndexByte(logb, '\n') + 1; n < len(logb) {
+		if err := os.Truncate(seenLogPath(keyPath), int64(n)); err != nil {
+			return fmt.Errorf("seen log: drop torn tail: %w", err)
+		}
+		logb = logb[:n]
+	}
 	lines := strings.Split(string(logb), "\n")
 	entries := make([]client.SeenEntry, 0, len(lines))
 	for i, line := range lines {
@@ -159,9 +169,6 @@ func restoreSessions(c *client.Client, keyPath string) error {
 		}
 		var e client.SeenEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			if i == len(lines)-1 {
-				break // torn last line
-			}
 			return fmt.Errorf("seen log line %d: %w", i+1, err)
 		}
 		entries = append(entries, e)
