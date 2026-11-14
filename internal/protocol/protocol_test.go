@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	gocql "github.com/apache/cassandra-gocql-driver/v2"
 
 	"github.com/lioneljmorrison/klacks/internal/core"
 	"github.com/lioneljmorrison/klacks/internal/store"
@@ -209,6 +212,8 @@ func TestErrorFor(t *testing.T) {
 		{core.ErrRoomNotFound, CodeRoomNotFound},
 		{core.ErrInvalidArgument, CodeInvalidArgument},
 		{errors.New("pg: connection refused at 10.0.0.5"), CodeInternal},
+		{fmt.Errorf("post message: %w", context.DeadlineExceeded), CodeUnavailable},
+		{fmt.Errorf("post message: scylla: %w", gocql.ErrTimeoutNoResponse), CodeUnavailable},
 	} {
 		got := ErrorFor(tc.err)
 		if got.Code != tc.code {
@@ -222,6 +227,10 @@ func TestErrorFor(t *testing.T) {
 	_, err := Decode([]byte(`{"v":1,"type":"subscribe"}`))
 	if got := ErrorFor(err); !strings.Contains(got.Message, "room_id is required") {
 		t.Errorf("bad_frame message = %q; want the reason", got.Message)
+	}
+	// An outage names no store detail either.
+	if got := ErrorFor(fmt.Errorf("pg 10.0.0.5: %w", context.DeadlineExceeded)); strings.Contains(got.Message, "10.0.0.5") {
+		t.Errorf("unavailable error leaked: %q", got.Message)
 	}
 	// Internal details never reach the client.
 	if got := ErrorFor(errors.New("pg: connection refused at 10.0.0.5")); strings.Contains(got.Message, "10.0.0.5") {

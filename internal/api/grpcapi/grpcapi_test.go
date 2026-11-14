@@ -3,6 +3,7 @@ package grpcapi_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -285,6 +286,7 @@ func TestErrorMapping(t *testing.T) {
 		"forbid":    chat.ErrForbidden,
 		"payload":   chat.ErrPayloadTooLarge,
 		"closed":    chat.ErrClosed,
+		"outage":    fmt.Errorf("post message: %w", context.DeadlineExceeded),
 		"other":     errors.New("boom"),
 	}
 	wantCode := map[string]codes.Code{
@@ -296,6 +298,7 @@ func TestErrorMapping(t *testing.T) {
 		"forbid":    codes.PermissionDenied,
 		"payload":   codes.InvalidArgument,
 		"closed":    codes.Unavailable,
+		"outage":    codes.Unavailable,
 		"other":     codes.Internal,
 	}
 

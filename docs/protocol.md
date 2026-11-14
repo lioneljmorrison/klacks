@@ -170,9 +170,25 @@ it answers when the server knows them (`message_id` for a publish).
 | `forbidden`           | The user's role does not allow the action.                 |
 | `room_not_found`      | The room does not exist.                                   |
 | `invalid_argument`    | A request argument is invalid.                             |
-| `internal`            | Server error. Details are logged, not sent.                |
+| `unavailable`         | A store was unreachable, timed out or overloaded, or the room lock could not be had in time. Transient: retry. |
+| `internal`            | Server error. Details are logged, not sent. Do not retry blindly. |
 
 `code` values are stable; `message` is for people and may change.
+
+**Retrying `unavailable`.** Back off before retrying (for example
+exponentially from 1 s, capped at 30 s, with jitter), since the store is
+likely still recovering. A failed `subscribe` or `resume` is safe to repeat
+as is. A failed `publish` was almost always not committed: re-sending the
+same envelope is safe while its `message_id` has not been delivered. The
+exception is a timeout that hit while the commit itself was in flight,
+which may have committed. If a `deliver` with that `message_id` arrives,
+it did. So resume the room before re-sending, and skip the publish if the
+message is already there. A second copy of a `message_id` at another seq
+is rejected by receivers as tampering (see
+[AEAD envelope](#aead-envelope-and-associated-data-s-25)). Re-send the
+same envelope rather than re-encrypting: the AD binds `message_id`, not
+seq. The prekey REST API answers the same condition
+with `503` and `{"code":"unavailable"}`, and gRPC with `UNAVAILABLE`.
 
 ## Backpressure
 
