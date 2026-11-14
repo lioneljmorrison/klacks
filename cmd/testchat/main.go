@@ -102,10 +102,13 @@ func main() {
 		}
 	}
 	if ks == nil {
-		// New keys make any saved sessions meaningless: drop them.
-		if err := os.Remove(sessionsPath(keyPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintln(os.Stderr, "testchat:", err)
-			os.Exit(2)
+		// New keys make any saved sessions, and the seen log that goes
+		// with them, meaningless: drop them.
+		for _, p := range []string{sessionsPath(keyPath), seenLogPath(keyPath)} {
+			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintln(os.Stderr, "testchat:", err)
+				os.Exit(2)
+			}
 		}
 		ks, err = freshKeys()
 		if err != nil {

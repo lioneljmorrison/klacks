@@ -28,6 +28,10 @@ package client
 // The snapshot holds secret key material. Callers store it as they store
 // the identity key.
 //
+// A device that saves often (after every delivery) should use
+// MarshalStateIncremental (S-49): the rooms' seen sets grow with history,
+// so they go to an append-only log instead of into every snapshot.
+//
 // Saving must happen before a sealed message is transmitted, not after:
 // a chain step on the wire but not on disk would come back after a restart
 // and seal the next message under the same key and nonce. Every publish
@@ -36,10 +40,12 @@ package client
 // before publishing.
 
 import (
+	"cmp"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // stateVersion versions the snapshot format. Version 1 (S-40) held only
@@ -186,9 +192,74 @@ func (c *Client) LastSeq(room [16]byte) (seq int64, ok bool) {
 
 // MarshalState returns a snapshot of the client's state for RestoreState.
 // It holds secret key material.
+//
+// The snapshot includes every room's seen set, so it grows with the
+// rooms' history. A device that saves often should use
+// MarshalStateIncremental instead (S-49).
 func (c *Client) MarshalState() ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.marshalLocked(true)
+}
+
+// SeenEntry is one consumed message in a room's seq stream: the message id
+// the device saw at that seq. The device checks redeliveries and tampering
+// against these (checkOrdering), so they must survive a restart.
+type SeenEntry struct {
+	Room [16]byte `json:"room"`
+	Seq  int64    `json:"seq"`
+	ID   [16]byte `json:"id"`
+}
+
+// MarshalStateIncremental is MarshalState without the rooms' seen sets, so
+// its size does not grow with history (S-49). The seen entries come back
+// separately: those recorded since the caller last acknowledged them with
+// SeenPersisted, in the order they were recorded. The caller appends them
+// to a log, then saves the state, then calls SeenPersisted; on restart it
+// calls RestoreState with the state and RestoreSeen with the whole log.
+// Writing the log first means a crash never leaves the state ahead of the
+// log; an entry logged but not acknowledged is offered again, and a
+// duplicate in the log is harmless.
+func (c *Client) MarshalStateIncremental() ([]byte, []SeenEntry, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	b, err := c.marshalLocked(false)
+	if err != nil {
+		return nil, nil, err
+	}
+	return b, append([]SeenEntry(nil), c.seenLog...), nil
+}
+
+// SeenPersisted acknowledges the first n entries MarshalStateIncremental
+// returned: they are in the caller's log and are not offered again.
+func (c *Client) SeenPersisted(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n = min(n, len(c.seenLog))
+	c.seenLog = append([]SeenEntry(nil), c.seenLog[n:]...)
+}
+
+// RestoreSeen adds logged seen entries to the rooms' seen sets, after
+// RestoreState with an incremental state. An entry for a room the state
+// does not know (the log was written, the state not yet) is kept too: it
+// only ever makes the checks stricter.
+func (c *Client) RestoreSeen(entries []SeenEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, e := range entries {
+		rs, ok := c.rooms[e.Room]
+		if !ok {
+			rs = &roomState{seen: make(map[int64][16]byte), ids: make(map[[16]byte]int64)}
+			c.rooms[e.Room] = rs
+		}
+		rs.seen[e.Seq] = e.ID
+		rs.ids[e.ID] = e.Seq
+	}
+}
+
+// marshalLocked snapshots the state, with the rooms' seen sets or without.
+// The caller holds c.mu.
+func (c *Client) marshalLocked(withSeen bool) ([]byte, error) {
 	snap := stateSnapshot{V: stateVersion}
 	for k, s := range c.sessions {
 		snap.Sessions = append(snap.Sessions, snapshotSession(k.room, s))
@@ -202,8 +273,10 @@ func (c *Client) MarshalState() ([]byte, error) {
 	}
 	for room, rs := range c.rooms {
 		r := roomSnapshot{Room: room, Started: rs.started, LastSeq: rs.lastSeq, Removed: rs.removed}
-		for seq, id := range rs.seen {
-			r.Seen = append(r.Seen, seenSnapshot{Seq: seq, ID: id})
+		if withSeen {
+			for seq, id := range rs.seen {
+				r.Seen = append(r.Seen, seenSnapshot{Seq: seq, ID: id})
+			}
 		}
 		snap.Rooms = append(snap.Rooms, r)
 	}
@@ -257,14 +330,19 @@ func (c *Client) RestoreState(b []byte) error {
 		order = append(order, fk)
 	}
 	rooms := make(map[[16]byte]*roomState, len(snap.Rooms))
+	// A snapshot's seen entries (MarshalState) are queued for the log, so a
+	// caller moving to incremental saves migrates them on its first save.
+	var seenLog []SeenEntry
 	for _, r := range snap.Rooms {
 		rs := &roomState{
 			started: r.Started, lastSeq: r.LastSeq, removed: r.Removed,
 			seen: make(map[int64][16]byte, len(r.Seen)), ids: make(map[[16]byte]int64, len(r.Seen)),
 		}
-		for _, sn := range r.Seen {
+		seen := slices.SortedFunc(slices.Values(r.Seen), func(a, b seenSnapshot) int { return cmp.Compare(a.Seq, b.Seq) })
+		for _, sn := range seen {
 			rs.seen[sn.Seq] = sn.ID
 			rs.ids[sn.ID] = sn.Seq
+			seenLog = append(seenLog, SeenEntry{Room: r.Room, Seq: sn.Seq, ID: sn.ID})
 		}
 		rooms[r.Room] = rs
 	}
@@ -309,6 +387,7 @@ func (c *Client) RestoreState(b []byte) error {
 	c.skPeers = skPeers
 	c.skPending = skPending
 	c.roomPeers = roomPeers
+	c.seenLog = seenLog
 	return nil
 }
 
