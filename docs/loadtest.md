@@ -118,7 +118,7 @@ its usual services.
 | M4 | Apple M4, 10 cores, 16 GB; databases in a colima VM (4 CPU, 4 GB) | G-8: 10k conns, 1k msg/s | 6.2 ms | ≤ 2 ms / ≤ 8 ms | 50 / 60 | **pass** |
 | lab-hermes | Intel i3-6100T, 4 threads, 7 GB, Debian 13 | G-8 | 8.63 s | ≤ 64 ms / ≤ 128 ms | 60 / 60 | fail: p99, 39,019 of 540,009 still in flight |
 | lab-hermes | same | 1k conns, 100 msg/s, 30 s | 22 ms | ≤ 8 ms / ≤ 64 ms | 4 / 60 | **pass** |
-| nas | AMD A10-5700, 4 cores, 30 GB, Debian 13 | — | — | — | — | not run: ScyllaDB exits with SIGILL on this CPU (AVX, no AVX2) |
+| nas | AMD A10-5700, 4 cores, 30 GB, Debian 13 | — | — | — | — | not run: ScyllaDB exits with SIGILL (illegal instruction) on this CPU, which has AVX but not AVX2; the exact instruction was not identified |
 
 On lab-hermes the full profile saturates the pool and the room lock
 (p50 64 ms), so publishes queue and delivery falls seconds behind; no
