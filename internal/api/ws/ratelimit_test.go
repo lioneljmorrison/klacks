@@ -32,12 +32,14 @@ func TestPublishUserRateLimit(t *testing.T) {
 			Ciphertext: []byte("ct"),
 		})
 	}
+	// Requests run concurrently, so which of the three is refused is not
+	// fixed: exactly one is, and its frame names it.
 	e := errorOf(t, next(t, frames, 5*time.Second))
-	want := mustID(t, msgStr)
-	want[15] = 2
-	if e.Code != protocol.CodeRateLimited || e.RoomID != mustID(t, roomStr) || e.MessageID != want {
-		t.Errorf("error = %+v; want rate_limited naming the room and the third message", e)
+	base := mustID(t, msgStr)
+	if e.Code != protocol.CodeRateLimited || e.RoomID != mustID(t, roomStr) || [15]byte(e.MessageID[:15]) != [15]byte(base[:15]) || e.MessageID[15] > 2 {
+		t.Errorf("error = %+v; want rate_limited naming the room and one of the messages", e)
 	}
+	wantNothing(t, frames, 100*time.Millisecond)
 	if n := chat.postCount(); n != 2 {
 		t.Errorf("core saw %d posts; want 2", n)
 	}
