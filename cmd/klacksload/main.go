@@ -139,7 +139,7 @@ func writeRecord(w io.Writer, rec record) error {
 }
 
 func appendRecord(path string, rec record) error {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // the path is the operator's own -json flag
 	if err != nil {
 		return err
 	}
