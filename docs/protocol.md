@@ -1,4 +1,4 @@
-# Client wire protocol (v1)
+# klacks wire protocol (v1)
 
 Clients talk to klacks over a WebSocket at `/ws`. This document describes
 the frames. The Go definitions are in `internal/protocol`; keep the two in step.
