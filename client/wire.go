@@ -338,6 +338,26 @@ func (c *Client) decryptDeliver(d deliver, redelivery bool) {
 	}
 }
 
+// stash appends d to a stash unless the stash already holds it (S-52): a
+// message redelivered while it waits (resume and live delivery overlap) is
+// one message, and draining two copies would emit it twice.
+func stash(ds []deliver, d deliver) []deliver {
+	if stashed(ds, d) {
+		return ds
+	}
+	return append(ds, d)
+}
+
+// stashed reports whether ds holds d's (seq, message id).
+func stashed(ds []deliver, d deliver) bool {
+	for _, x := range ds {
+		if x.Seq == d.Seq && x.MessageID == d.MessageID {
+			return true
+		}
+	}
+	return false
+}
+
 // takePending returns and clears the messages stashed for a sender device.
 func (c *Client) takePending(room, senderDevice [16]byte) []deliver {
 	c.mu.Lock()
