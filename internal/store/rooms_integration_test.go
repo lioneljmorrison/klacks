@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/lioneljmorrison/klacks/internal/store"
 	"github.com/lioneljmorrison/klacks/internal/testutil/dbtest"
@@ -152,12 +153,12 @@ func TestRoomsSeq(t *testing.T) {
 			if got := l.NextSeq(); got != want {
 				t.Fatalf("NextSeq = %d, want %d", got, want)
 			}
-			ts, err := l.WriteTS(ctx)
+			_, _, ts, err := l.RoleAndWriteTS(ctx, id(0xb1))
 			if err != nil {
 				return err
 			}
 			if ts <= prevTS {
-				t.Fatalf("WriteTS %d after %d: not increasing", ts, prevTS)
+				t.Fatalf("write ts %d after %d: not increasing", ts, prevTS)
 			}
 			prevTS = ts
 			return l.AdvanceSeq(ctx)
@@ -270,5 +271,77 @@ func TestRoomsOnLockHeld(t *testing.T) {
 	}
 	if held[0] < work {
 		t.Errorf("held %v; want at least the %v of work inside", held[0], work)
+	}
+}
+
+// S-48: the room lock's timeouts ride on BEGIN and stay transaction-local:
+// the pooled connection is back at the server defaults afterwards.
+func TestRoomsLockTimeoutsAreTransactionLocal(t *testing.T) {
+	cfg, err := pgxpool.ParseConfig(dbtest.MigratedPostgresDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 1 // every call below shares one connection
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	ctx := context.Background()
+	show := func() (lock, stmt, idle string) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, `SELECT current_setting('lock_timeout'), current_setting('statement_timeout'),
+			current_setting('idle_in_transaction_session_timeout')`).Scan(&lock, &stmt, &idle); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	l0, s0, i0 := show()
+	rooms := store.NewRooms(pool, 1234*time.Millisecond)
+	room, err := rooms.CreateRoom(ctx, "group", id(0xb1), "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rooms.Locked(ctx, room, func(context.Context, *store.LockedRoom) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if l, s, i := show(); l != l0 || s != s0 || i != i0 {
+		t.Errorf("after Locked: %s %s %s; want the defaults %s %s %s", l, s, i, l0, s0, i0)
+	}
+}
+
+// S-48: the role check and the write timestamp come back together, after the
+// lock: a member gets its role, a non-member ok == false, and every call a
+// fresh, increasing timestamp.
+func TestRoomsRoleAndWriteTS(t *testing.T) {
+	rooms := store.NewRooms(dbtest.MigratedPostgres(t), testLockTimeout)
+	ctx := context.Background()
+	room, err := rooms.CreateRoom(ctx, "group", id(0xb1), "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var last int64
+	for _, tc := range []struct {
+		user store.UUID
+		role string
+		ok   bool
+	}{{id(0xb1), "owner", true}, {id(0xb2), "", false}, {id(0xb1), "owner", true}} {
+		err := rooms.Locked(ctx, room, func(ctx context.Context, l *store.LockedRoom) error {
+			role, ok, ts, err := l.RoleAndWriteTS(ctx, tc.user)
+			if err != nil {
+				return err
+			}
+			if role != tc.role || ok != tc.ok {
+				t.Errorf("user %x: role %q ok %v; want %q %v", tc.user, role, ok, tc.role, tc.ok)
+			}
+			if ts <= last {
+				t.Errorf("write ts %d not above %d", ts, last)
+			}
+			last = ts
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }

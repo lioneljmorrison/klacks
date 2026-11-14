@@ -81,3 +81,53 @@ default pool.**
   watch `klacks_room_lock_held_seconds`.
 - Not covered: multiple server nodes, a remote database, rate limits (S-32
   limits are off on this branch's base).
+
+## S-48: fewer round trips per publish
+
+A publish's PostgreSQL transaction went from 7 round trips to 5. The
+statements are now:
+
+1. `BEGIN` together with its `SET LOCAL` timeouts, sent as one
+   simple-protocol message (pgx `TxOptions.BeginQuery`). They stay
+   transaction-local, and `lock_timeout` is in force before the row lock.
+2. `SELECT … FOR UPDATE`.
+3. The role check and `nextval('message_write_ts')`, as one statement
+   after the lock.
+4. `UPDATE`.
+5. `COMMIT`.
+
+Two folds are deliberately not done, because each would break
+correctness:
+
+- **The role check stays out of the `FOR UPDATE`.** Under READ COMMITTED,
+  a statement that waited for the lock doesn't see concurrent changes to
+  other rows, so it could miss a removal.
+- **`nextval` stays out of the `FOR UPDATE`.** Nothing guarantees it
+  would be evaluated after the lock wait.
+
+The plan's other candidate was session-level timeouts via `AfterConnect`.
+It would have applied the timeouts to every query on the pool, and
+`pkg/chat` embedders' pools would have lost them.
+
+Measured on the same host, all numbers p50:
+
+- **Per step, unloaded.** Each round trip costs about 0.3 ms. `COMMIT`
+  (the WAL flush) costs about 2.6 ms and is the floor.
+- **`PostMessage`, unloaded, 2,700 publishes.** 5.9–6.4 ms before,
+  5.3 ms after. The ~0.6 ms saved matches the two round trips.
+- **Load run, default pool (24), same settings as above.** Two runs
+  each:
+
+  | | Run 1 delivery p99 | Run 2 delivery p99 |
+  |---|---|---|
+  | Before | 2.09 s | 227 ms |
+  | After | 247 ms | 230 ms |
+
+  Lock hold p50 was ≤ 8 ms after the change, and both before and after
+  had runs at ≤ 8 ms. On this single shared host, run-to-run variance
+  outweighs the change. The load-level effect is **not established**,
+  and the pool still saturates at 24.
+
+  The sizing rule above still applies. A larger effect needs commit
+  latency to come down, which depends on real disks or group commit. It
+  can't come from fewer statements.
