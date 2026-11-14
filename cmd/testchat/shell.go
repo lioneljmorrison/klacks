@@ -7,7 +7,6 @@ package main
 import (
 	"context"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"sort"
 	"strconv"
@@ -217,16 +216,15 @@ func (a *app) cmdDial(ctx context.Context) {
 
 // cmdRegister uploads this device's bundle, re-uploading the current
 // one-time prekey pool. Startup registers only when the key state says the
-// bundle is not on the server yet; this is the manual path after a server
-// wipe (make nuke) or a failed startup register.
+// bundle is not on the server yet; this is the manual path after a failed
+// startup register. A server wipe (make nuke) needs -fresh instead: see
+// the registration comment in run.
 func (a *app) cmdRegister(ctx context.Context) {
 	if err := a.c.Register(ctx); err != nil {
 		a.outf("register: %v", err)
 		return
 	}
-	a.keys.Registered = true
-	syncKeysFromClient(a.keys, a.c)
-	if err := saveKeys(a.keyPath, a.keys); err != nil {
+	if err := a.saveRegistered(); err != nil {
 		a.outf("registered, but saving the key state failed: %v", err)
 		return
 	}
@@ -281,12 +279,22 @@ func (a *app) cmdReplenish(ctx context.Context, args []string) {
 		a.outf("replenish: n must be an integer in 1..1000")
 		return
 	}
-	// Generate locally, upload the public halves via the dev REST shape,
-	// then persist the private halves — the same work client.Replenish
-	// does, split so the key file can follow along.
+	// Generate locally, persist the private halves, then upload the public
+	// ones via the dev REST shape — the same work client.Replenish does,
+	// split so the key file can follow along. Saving comes first: a crash
+	// after the upload but before the save would leave public keys on the
+	// server whose private halves never reached the disk, and initiations
+	// that consume them could not be answered after a restart. The other
+	// way round, a crash only leaves unused private halves behind.
 	opks, err := a.c.NewOneTimePrekeys(n)
 	if err != nil {
 		a.outf("replenish: %v", err)
+		return
+	}
+	// saveState writes the client's whole pool, the new keys included,
+	// under the lock the pump's per-delivery saves take.
+	if err := a.saveState(); err != nil {
+		a.outf("replenish: keys generated but saving failed, nothing uploaded: %v", err)
 		return
 	}
 	wire := make([]map[string]any, len(opks))
@@ -295,15 +303,6 @@ func (a *app) cmdReplenish(ctx context.Context, args []string) {
 	}
 	if err := a.rest(ctx, "POST", "/v1/device/prekeys", map[string]any{"one_time_prekeys": wire}, nil); err != nil {
 		a.outf("replenish: %v", err)
-		return
-	}
-	for _, p := range opks {
-		a.keys.OneTimePrekeys = append(a.keys.OneTimePrekeys, wirePrekey{
-			ID: p.ID, Priv: hex.EncodeToString(p.Priv[:]), Pub: hex.EncodeToString(p.Pub[:]),
-		})
-	}
-	if err := saveKeys(a.keyPath, a.keys); err != nil {
-		a.outf("replenish: keys generated but saving failed: %v", err)
 		return
 	}
 	a.outf("uploaded %d one-time prekeys (%d held)", n, a.c.OneTimePrekeysHeld())

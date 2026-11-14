@@ -138,13 +138,18 @@ func restoreSessions(c *client.Client, keyPath string) error {
 // shutdown. Before every publish is the part that matters for safety: a
 // send chain step that reached the wire but not the disk would come back
 // after a restart and seal the next message under the same key and nonce.
+//
+// Sessions are written first. A one-time prekey leaves the key file once an
+// initiation consumed it; were the key file written first, a crash between
+// the two writes would lose that prekey's private half with the session it
+// built unsaved, and the initiation's redelivery could never be answered.
+// The other way round, a crash leaves only an unneeded private half behind.
+// The pool is read before the sessions, so it never misses a prekey a saved
+// session has not consumed yet.
 func (a *app) saveState() error {
 	a.saveMu.Lock()
 	defer a.saveMu.Unlock()
 	syncKeysFromClient(a.keys, a.c)
-	if err := saveKeys(a.keyPath, a.keys); err != nil {
-		return fmt.Errorf("save keys: %w", err)
-	}
 	b, err := a.c.MarshalSessions()
 	if err != nil {
 		return fmt.Errorf("save sessions: %w", err)
@@ -152,7 +157,20 @@ func (a *app) saveState() error {
 	if err := writeFileAtomic(sessionsPath(a.keyPath), b); err != nil {
 		return fmt.Errorf("save sessions: %w", err)
 	}
+	if err := saveKeys(a.keyPath, a.keys); err != nil {
+		return fmt.Errorf("save keys: %w", err)
+	}
 	return nil
+}
+
+// saveRegistered records that the server holds this device's bundle and
+// saves the state. The pump may be saving concurrently, so the flag is set
+// under saveMu like every other write to the key state.
+func (a *app) saveRegistered() error {
+	a.saveMu.Lock()
+	a.keys.Registered = true
+	a.saveMu.Unlock()
+	return a.saveState()
 }
 
 // clientFromKeys builds the reference client from persisted material.

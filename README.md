@@ -55,8 +55,10 @@ to UUIDs (see [Names](#names)).
   so the same `-user` is the same device with the same sessions on every
   run: messages peers seal while the CLI is down, or sent over its
   sessions before a restart, decrypt after it (`-fresh` starts over with
-  new keys and no sessions; `/register` re-uploads the bundle after a
-  `make nuke`). Sessions are saved before every publish and after every
+  new keys and no sessions). After a `make nuke`, start each CLI device
+  with `-fresh`: room seqs restart at 1, and saved sessions remember the
+  seqs their peers' initiations arrived at, so they would refuse a peer's
+  new session as a replay of an old one. Sessions are saved before every publish and after every
   delivery, so a crash can't make the CLI reuse a message key. `/send`
   watches a room live; `/join` or `/resume` replay its history.
 - **The dev UI** — a browser client with full E2EE (X3DH + Double Ratchet

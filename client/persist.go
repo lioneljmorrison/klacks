@@ -11,6 +11,11 @@ package client
 // its first delivery, as a fresh one does), messages stashed pending their
 // session's first message (resume redelivers them), and sender-key state.
 //
+// Each peer-initiated session keeps the room seq its initiation arrived at,
+// which is how a replayed older initiation is told from a new one
+// (newcomerWins). A snapshot is therefore tied to the server's seq history:
+// after the server's data is wiped and seqs restart, discard it.
+//
 // The snapshot holds secret key material. Callers store it as they store
 // the identity key.
 //
@@ -43,6 +48,7 @@ type sessionSnapshot struct {
 	UsedOneTime int64           `json:"used_one_time"`
 	InitID      [32]byte        `json:"init_id"`
 	InitEph     [32]byte        `json:"init_eph"`
+	EstSeq      int64           `json:"est_seq,omitempty"`
 	Ratchet     ratchetSnapshot `json:"ratchet"`
 }
 
@@ -157,7 +163,7 @@ func snapshotSession(room [16]byte, s *session) sessionSnapshot {
 	}
 	return sessionSnapshot{
 		Room: room, Peer: s.peer, First: s.first, Pre: s.pre, UsedOneTime: s.usedOneTime,
-		InitID: s.initID, InitEph: s.initEph, Ratchet: rs,
+		InitID: s.initID, InitEph: s.initEph, EstSeq: s.estSeq, Ratchet: rs,
 	}
 }
 
@@ -180,6 +186,6 @@ func restoreSession(ss sessionSnapshot) *session {
 	}
 	return &session{
 		peer: ss.Peer, ratchet: r, first: ss.First, pre: ss.Pre, usedOneTime: ss.UsedOneTime,
-		initID: ss.InitID, initEph: ss.InitEph,
+		initID: ss.InitID, initEph: ss.InitEph, estSeq: ss.EstSeq,
 	}
 }

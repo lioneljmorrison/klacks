@@ -230,3 +230,34 @@ func TestRestoredSessionSurvivesReplayOfOpeningMessage(t *testing.T) {
 		t.Fatalf("dave got %+v", r)
 	}
 }
+
+// The seq a peer's initiation arrived at survives a restart: it is what
+// tells a replay of an older initiation from a new one (newcomerWins).
+func TestRestoreKeepsEstablishmentSeq(t *testing.T) {
+	c, err := NewClient("http://unused", [16]byte{1}, [16]byte{0xA1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewResponderRatchet([32]byte{1}, c.spk, [32]byte{9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	room, peer := [16]byte{7}, [16]byte{0xB1}
+	c.sessions[sessionKey{room: room, peer: peer}] = &session{
+		peer: Peer{User: [16]byte{2}, Device: peer}, ratchet: r, estSeq: 42,
+	}
+	b, err := c.MarshalSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewClient("http://unused", [16]byte{1}, [16]byte{0xA1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RestoreSessions(b); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.sessions[sessionKey{room: room, peer: peer}].estSeq; got != 42 {
+		t.Fatalf("estSeq after restore = %d, want 42", got)
+	}
+}

@@ -388,3 +388,97 @@ func TestPeerReinitiationAlwaysWins(t *testing.T) {
 		seq++
 	}
 }
+
+// A replay of a peer's old initiations — /join resumes from seq 0, so a
+// room's whole history comes back — must not displace the session the
+// peer re-initiated since. Once the old initiations have been evicted from
+// the bounded fallbacks they are no longer recognised as redeliveries, and
+// without one-time prekeys nothing else stops them being answered afresh.
+// The peer's current session must keep working both ways afterwards.
+func TestReplayedOldInitiationsDoNotDisplaceCurrentSession(t *testing.T) {
+	ctx := context.Background()
+	base := restDevices(t)
+	dave, err := NewClient(base, [16]byte{4}, [16]byte{0xD1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	carol, err := NewClient(base, [16]byte{3}, [16]byte{0xC1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No one-time prekeys: a replayed initiation then needs no private
+	// half that respondLocked would already have deleted.
+	carol.mu.Lock()
+	carol.opkPrivs = map[int64]OneTimePrekey{}
+	carol.mu.Unlock()
+	if err := dave.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := carol.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	room := [16]byte{9}
+	peerCarol := Peer{User: carol.user, Device: carol.device}
+	peerDave := Peer{User: dave.user, Device: dave.device}
+	key := sessionKey{room: room, peer: carol.device}
+	type sent struct {
+		seq  int64
+		from *Client
+		e    encryptResult
+	}
+	var history []sent
+	seq := int64(1)
+	exchange := func(from, to *Client, plaintext string) error {
+		peer := peerCarol
+		if from == carol {
+			peer = peerDave
+		}
+		e, err := from.sealFor(ctx, room, peer, []byte(plaintext))
+		if err != nil {
+			t.Fatal(err)
+		}
+		history = append(history, sent{seq, from, e})
+		from.handleDeliver(deliverOf(room, seq, from, e))
+		to.handleDeliver(deliverOf(room, seq, from, e))
+		seq++
+		return inbox(t, to).Err
+	}
+	// Dave starts over more times than carol keeps fallbacks for.
+	for i := 0; i < fallbacksKept+2; i++ {
+		dave.mu.Lock()
+		delete(dave.sessions, key)
+		dave.mu.Unlock()
+		if err := exchange(dave, carol, "init"); err != nil {
+			t.Fatalf("initiation %d: %v", i, err)
+		}
+	}
+	// The current session moves on: carol's reply is a DH ratchet step.
+	if err := exchange(carol, dave, "reply"); err != nil {
+		t.Fatal(err)
+	}
+	if err := exchange(dave, carol, "and back"); err != nil {
+		t.Fatal(err)
+	}
+	// The history replays to carol, as /join's resume from 0 does.
+	for _, h := range history {
+		carol.handleDeliver(deliverOf(room, h.seq, h.from, h.e))
+	}
+	drain(carol)
+	if err := exchange(dave, carol, "after the replay"); err != nil {
+		t.Fatalf("dave to carol after the replay: %v", err)
+	}
+	if err := exchange(carol, dave, "and the answer"); err != nil {
+		t.Fatalf("carol to dave after the replay: %v", err)
+	}
+}
+
+// drain empties a client's inbox without blocking.
+func drain(c *Client) {
+	for {
+		select {
+		case <-c.Inbox:
+		default:
+			return
+		}
+	}
+}

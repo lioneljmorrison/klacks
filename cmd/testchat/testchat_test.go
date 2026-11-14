@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,4 +162,116 @@ func TestSecondProcessForSameDeviceRefused(t *testing.T) {
 		t.Fatalf("lock after release: %v", err)
 	}
 	again()
+}
+
+// /replenish and the pump's per-delivery save both write the key state:
+// they must not race (run with -race), and the replenished keys must be
+// on disk afterwards.
+func TestReplenishDoesNotRaceDeliverySaves(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	a, _ := testApp(t)
+	a.base = srv.URL
+	a.httpc = srv.Client()
+	c, err := clientFromKeys(srv.URL, a.user, [16]byte{3}, a.keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.c = c
+	stop := make(chan struct{})
+	saved := make(chan struct{})
+	go func() {
+		defer close(saved)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if err := a.saveState(); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}
+	}()
+	for i := 0; i < 5; i++ {
+		a.cmdReplenish(context.Background(), []string{"3"})
+	}
+	close(stop)
+	<-saved
+	ks, err := loadKeys(a.keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(ks.OneTimePrekeys), c.OneTimePrekeysHeld(); got != want {
+		t.Fatalf("key file holds %d one-time prekeys, client holds %d", got, want)
+	}
+}
+
+// saveState writes the sessions before the key file: a crash between the
+// two must not leave a key file that has dropped a consumed one-time
+// prekey while the session built from it never reached the disk. A
+// sessions write that fails therefore leaves the key file untouched.
+func TestSaveStateWritesSessionsBeforeKeys(t *testing.T) {
+	a, _ := testApp(t)
+	c, err := clientFromKeys("http://test.invalid", a.user, [16]byte{3}, a.keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.c = c
+	if err := saveKeys(a.keyPath, a.keys); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(a.keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.keys.Registered = true // a change the next save would write
+	// A directory where the sessions file goes makes its rename fail.
+	if err := os.Mkdir(sessionsPath(a.keyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsPath(a.keyPath), "x"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.saveState(); err == nil {
+		t.Fatal("saveState succeeded with an unwritable sessions file")
+	}
+	after, err := os.ReadFile(a.keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("the key file was rewritten although the sessions write failed")
+	}
+}
+
+// /replenish saves the new private halves before uploading the public
+// ones: a crash in between must not leave keys on the server this device
+// can never answer. A save that fails therefore uploads nothing.
+func TestReplenishSavesBeforeUpload(t *testing.T) {
+	uploads := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uploads++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	a, out := testApp(t)
+	a.base = srv.URL
+	a.httpc = srv.Client()
+	c, err := clientFromKeys(srv.URL, a.user, [16]byte{3}, a.keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.c = c
+	// A directory where the sessions file goes makes saveState fail.
+	if err := os.MkdirAll(filepath.Join(sessionsPath(a.keyPath), "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a.cmdReplenish(context.Background(), []string{"3"})
+	if uploads != 0 {
+		t.Fatalf("uploaded %d time(s) although saving the keys failed: %s", uploads, out)
+	}
 }

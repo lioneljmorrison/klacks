@@ -40,6 +40,11 @@ type session struct {
 	// while their in-flight messages arrive.
 	initID  [32]byte
 	initEph [32]byte
+	// estSeq is the room seq the peer's initiation was delivered at, for a
+	// session this device answered (0 for its own initiations). A peer's
+	// new initiation always arrives later than the one it replaces, so a
+	// prekey message at or below it is a replay of an older initiation.
+	estSeq int64
 }
 
 // sessionKey names a session: per room and per peer device.
@@ -167,7 +172,7 @@ func (c *Client) unseal(room [16]byte, d deliver) ([]byte, error) {
 		return nil, errNotForMe
 	}
 	if h.isPrekey() {
-		s, err = c.sessionForPrekey(room, key, d.Sender, h)
+		s, err = c.sessionForPrekey(room, key, d.Sender, d.Seq, h)
 		if err != nil {
 			return nil, err
 		}
@@ -208,7 +213,7 @@ func (c *Client) unseal(room [16]byte, d deliver) ([]byte, error) {
 // tie-break — the lower (identity DH, ephemeral) initiation wins, the
 // same verdict on both sides — and the loser becomes a receive-only
 // fallback while its in-flight messages arrive. The caller holds c.mu.
-func (c *Client) sessionForPrekey(room [16]byte, key sessionKey, sender [16]byte, h ratchetHeader) (*session, error) {
+func (c *Client) sessionForPrekey(room [16]byte, key sessionKey, sender [16]byte, seq int64, h ratchetHeader) (*session, error) {
 	if s, ok := c.sessions[key]; ok && s.initEph == h.pre.Ephemeral {
 		return s, nil // redelivery of the active session's initiation
 	}
@@ -219,8 +224,9 @@ func (c *Client) sessionForPrekey(room [16]byte, key sessionKey, sender [16]byte
 	if err != nil {
 		return nil, err
 	}
+	ns.estSeq = seq
 	active, ok := c.sessions[key]
-	if !ok || newcomerWins(*h.pre, active) {
+	if !ok || newcomerWins(*h.pre, seq, active) {
 		// The incoming initiation wins: it becomes active and the
 		// demoted session keeps receiving while its messages arrive.
 		if ok {
@@ -240,16 +246,17 @@ func (c *Client) sessionForPrekey(room [16]byte, key sessionKey, sender [16]byte
 //
 // When the peer that initiated the active session initiates again, it has
 // abandoned that session (it lost its state, or dropped a session whose
-// chain stopped opening), so the newcomer always wins: replying over the
-// old session would seal into one the peer no longer holds. Redeliveries
-// of earlier initiations never reach here; sessionForPrekey answers them
-// first.
+// chain stopped opening), so a newer initiation wins: replying over the
+// old session would seal into one the peer no longer holds. seq is the
+// room seq the incoming initiation was delivered at; one at or below the
+// active session's is a replay of an older initiation (a resume from 0
+// after it fell out of the bounded fallbacks) and must not displace it.
 //
 // Otherwise both devices initiated at once, and the lower (identity DH
 // key, ephemeral) pair wins, the same verdict on both sides.
-func newcomerWins(in PrekeyHeader, active *session) bool {
+func newcomerWins(in PrekeyHeader, seq int64, active *session) bool {
 	if in.IdentityDH == active.initID {
-		return true
+		return seq > active.estSeq
 	}
 	if c := bytes.Compare(in.IdentityDH[:], active.initID[:]); c != 0 {
 		return c < 0

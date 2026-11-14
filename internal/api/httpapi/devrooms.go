@@ -121,8 +121,7 @@ func (d *DevRooms) create(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, errorResponse{Code: "already_exists", Message: "a room with this id already exists"})
 			return
 		}
-		d.log.Error("dev rooms: create failed", "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Code: "internal", Message: "internal error"})
+		d.writeError(w, err)
 		return
 	}
 	for _, u := range users {
@@ -243,16 +242,21 @@ func (d *DevRooms) room(w http.ResponseWriter, r *http.Request) (store.UUID, boo
 	return room, true
 }
 
-// users parses a member list, rejecting empty and non-UUID entries.
+// users parses a member list, rejecting empty and non-UUID entries and
+// dropping repeats: a user listed twice is invited once.
 func (d *DevRooms) users(w http.ResponseWriter, in []string) ([]store.UUID, bool) {
 	out := make([]store.UUID, 0, len(in))
+	seen := make(map[store.UUID]bool, len(in))
 	for _, s := range in {
 		u, err := store.ParseUUID(s)
 		if err != nil || u == (store.UUID{}) {
 			writeJSON(w, http.StatusBadRequest, errorResponse{Code: "invalid_argument", Message: "member is not a UUID: " + s})
 			return nil, false
 		}
-		out = append(out, u)
+		if !seen[u] {
+			seen[u] = true
+			out = append(out, u)
+		}
 	}
 	return out, true
 }

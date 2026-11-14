@@ -234,7 +234,9 @@ func (a *app) run(ctx context.Context, log *slog.Logger) error {
 	// The bundle registers once per device: the keys are persisted, so the
 	// server's copy stays valid across runs, and re-uploading it wholesale
 	// would resurrect one-time prekeys peers have already consumed. A
-	// server whose data was wiped (make nuke) needs /register by hand.
+	// server whose data was wiped (make nuke) needs -fresh: its room seqs
+	// restart, and saved sessions would take peers' new initiations for
+	// replays of older ones (see client.newcomerWins).
 	if a.keys.Registered {
 		a.registered = true
 		a.outf("bundle already registered (keys restored from %s); /register re-uploads it", a.keyPath)
@@ -242,8 +244,7 @@ func (a *app) run(ctx context.Context, log *slog.Logger) error {
 		a.outf("register failed: %v", err)
 		a.outf("is the dev server running at %s? messaging needs a registered device — /register once it is", a.base)
 	} else {
-		a.keys.Registered = true
-		if err := saveKeys(a.keyPath, a.keys); err != nil {
+		if err := a.saveRegistered(); err != nil {
 			a.outf("registered, but saving the key state failed: %v", err)
 		}
 		a.registered = true
