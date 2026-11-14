@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -47,6 +49,27 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		devices   *httpapi.Devices
 		devRooms  *httpapi.DevRooms
 	)
+	var met *metrics
+	if cfg.Metrics.Addr != "" {
+		met = newMetrics(
+			func() poolStats {
+				st := pg.Stat()
+				return poolStats{Acquired: st.AcquiredConns(), Idle: st.IdleConns(), Total: st.TotalConns(), Max: st.MaxConns()}
+			},
+			func() int {
+				if mgr == nil {
+					return 0
+				}
+				return mgr.Connections()
+			},
+			func() int64 {
+				if mgr == nil {
+					return 0
+				}
+				return mgr.SlowDisconnects()
+			},
+		)
+	}
 	a, err := clientAuthenticator(cfg)
 	if err != nil {
 		return err
@@ -54,7 +77,11 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	dev := devTools(a)
 	if a != nil {
 		rooms := store.NewRooms(pg, roomLockTimeout)
-		messages := store.NewScyllaMessages(scylla)
+		var messages store.MessageStore = store.NewScyllaMessages(scylla)
+		if met != nil {
+			rooms.OnLockHeld = met.lockHeld
+			messages = met.timed(messages)
+		}
 		devices = httpapi.NewDevices(a, store.NewDevices(pg), log)
 		mgr = ws.NewManager(a, log)
 		// Fan-out goes through the manager: after each commit the core
@@ -107,6 +134,13 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		}
 		outer.Handle("/", srv.Handler())
 		srv.UseHandler(outer)
+	}
+	if met != nil {
+		stop, err := serveMetrics(ctx, cfg.Metrics.Addr, met.handler(), log)
+		if err != nil {
+			return err
+		}
+		defer stop()
 	}
 	err = srv.ListenAndServe(ctx)
 	if mgr != nil {
@@ -179,4 +213,28 @@ func clientAuthenticator(cfg config.Config) (auth.Authenticator, error) {
 func devTools(a auth.Authenticator) bool {
 	_, ok := a.(auth.Dev)
 	return ok
+}
+
+// serveMetrics serves GET /metrics on addr, its own listener, until stop.
+// A listener that cannot open fails startup.
+func serveMetrics(ctx context.Context, addr string, h http.Handler, log *slog.Logger) (stop func(), err error) {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: %w", err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", h)
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("metrics server failed", "err", err)
+		}
+	}()
+	log.Info("metrics listening", "addr", ln.Addr().String())
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}, nil
 }

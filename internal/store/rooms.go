@@ -26,6 +26,13 @@ const uniqueViolation = "23505"
 type Rooms struct {
 	pool        *pgxpool.Pool
 	lockTimeout time.Duration
+
+	// OnLockHeld, if not nil, is called after each Locked call that took
+	// its room's lock, with how long it held it: from the FOR UPDATE row
+	// lock to the end of the transaction, commit or rollback included
+	// (S-37). Publishes hold it across their ScyllaDB write, so this is the
+	// per-room serialization cost. Set it before use.
+	OnLockHeld func(time.Duration)
 }
 
 // NewRooms returns a Rooms on a pool whose database is migrated.
@@ -87,7 +94,8 @@ func createRoomSeqAndMember(ctx context.Context, tx pgx.Tx, room UUID, owner UUI
 // returns nil and rolls back otherwise. It returns ErrRoomNotFound, without
 // calling fn, if the room does not exist.
 func (r *Rooms) Locked(ctx context.Context, room UUID, fn func(context.Context, *LockedRoom) error) error {
-	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+	var locked time.Time
+	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		// set_config(..., true) is SET LOCAL: it lasts for this transaction.
 		ms := strconv.FormatInt(r.lockTimeout.Milliseconds(), 10)
 		if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true),
@@ -103,8 +111,14 @@ func (r *Rooms) Locked(ctx context.Context, room UUID, fn func(context.Context, 
 		if err != nil {
 			return fmt.Errorf("rooms: lock %x: %w", room, err)
 		}
+		locked = time.Now()
 		return fn(ctx, l)
 	})
+	// BeginFunc has committed or rolled back by now: the lock is released.
+	if !locked.IsZero() && r.OnLockHeld != nil {
+		r.OnLockHeld(time.Since(locked))
+	}
+	return err
 }
 
 // LockedRoom is a room whose lock is held by the enclosing Locked call. It
