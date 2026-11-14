@@ -140,3 +140,45 @@ func TestRedactedDoesNotAliasHosts(t *testing.T) {
 		t.Fatal("Redacted aliased the hosts slice")
 	}
 }
+
+func TestAuthJWTFromEnv(t *testing.T) {
+	m := map[string]string{
+		"KLACKS_AUTH_JWT_PUBLIC_KEY_FILE": "/etc/klacks/jwt.pub",
+		"KLACKS_AUTH_JWT_ISSUER":          "https://id.example",
+		"KLACKS_AUTH_JWT_AUDIENCE":        "klacks",
+	}
+	for k, v := range required {
+		m[k] = v
+	}
+	cfg, err := Load("", env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := JWT{PublicKeyFile: "/etc/klacks/jwt.pub", Issuer: "https://id.example", Audience: "klacks"}
+	if cfg.Auth.JWT != want {
+		t.Errorf("auth.jwt = %+v; want %+v", cfg.Auth.JWT, want)
+	}
+	if !cfg.Auth.JWT.Enabled() {
+		t.Error("Enabled() = false")
+	}
+	if (JWT{}).Enabled() {
+		t.Error("zero JWT Enabled() = true")
+	}
+}
+
+func TestAuthJWTNeedsIssuerAndAudience(t *testing.T) {
+	cfg := Default()
+	cfg.Postgres.DSN = "x"
+	cfg.Scylla.Hosts = []string{"a"}
+	cfg.Log.Format = "text"
+	cfg.Auth.JWT.PublicKeyFile = "/k"
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{"auth.jwt.issuer", "auth.jwt.audience"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %s", err, want)
+		}
+	}
+}
