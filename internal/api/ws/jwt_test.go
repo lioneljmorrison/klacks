@@ -118,3 +118,57 @@ func mustUUID(t *testing.T, s string) store.UUID {
 	}
 	return u
 }
+
+// S-43: a browser app on another origin connects when its origin is in
+// OriginPatterns; any other cross-origin upgrade is a 403.
+func TestOriginPatterns(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := auth.NewJWT(pub, "iss", "aud")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.MapClaims{
+		"iss": "iss", "aud": "aud", "sub": userStr, auth.ClaimDeviceID: deviceStr,
+		"exp": time.Now().Add(time.Hour).Unix(),
+	}).SignedString(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := func(m *Manager, origin string) int {
+		srv := httptest.NewServer(m)
+		defer srv.Close()
+		defer m.Close()
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		h := http.Header{"Authorization": {"Bearer " + tok}, "Origin": {origin}}
+		c, resp, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/ws", &websocket.DialOptions{HTTPHeader: h})
+		if err == nil {
+			_ = c.CloseNow()
+		}
+		if resp == nil {
+			t.Fatalf("dial: %v", err)
+		}
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return resp.StatusCode
+	}
+
+	m := NewManager(a, discard)
+	if got := status(m, "https://app.example.com"); got != http.StatusForbidden {
+		t.Errorf("no patterns, cross origin: status %d; want 403", got)
+	}
+	m = NewManager(a, discard)
+	m.OriginPatterns = []string{"app.example.com"}
+	if got := status(m, "https://app.example.com"); got != http.StatusSwitchingProtocols {
+		t.Errorf("allowed origin: status %d; want 101", got)
+	}
+	m = NewManager(a, discard)
+	m.OriginPatterns = []string{"app.example.com"}
+	if got := status(m, "https://evil.example.net"); got != http.StatusForbidden {
+		t.Errorf("other origin: status %d; want 403", got)
+	}
+}
