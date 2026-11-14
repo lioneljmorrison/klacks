@@ -141,7 +141,10 @@ licensing note on libsignal.
 ## Layout
 
 See [docs/architecture.md](docs/architecture.md) for a diagram of how the
-packages, transports and stores connect.
+packages, transports and stores connect, and
+[docs/operations.md](docs/operations.md) for running it: health and
+metrics, backup and restore of both stores (including `klacks reconcile`
+after a PostgreSQL restore), and failure modes.
 
 ```
 cmd/klacks           the server binary (serve, migrate, config)

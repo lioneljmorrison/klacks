@@ -240,3 +240,35 @@ func TestRoomsLockTimeouts(t *testing.T) {
 		}
 	})
 }
+
+// OnLockHeld (S-37) reports how long each Locked call held the room lock:
+// from the FOR UPDATE row lock to the end of the transaction, commit
+// included. A room that does not exist never held a lock.
+func TestRoomsOnLockHeld(t *testing.T) {
+	rooms := store.NewRooms(dbtest.MigratedPostgres(t), testLockTimeout)
+	ctx := context.Background()
+	room, err := rooms.CreateRoom(ctx, "group", id(0xb1), "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var held []time.Duration
+	rooms.OnLockHeld = func(d time.Duration) { held = append(held, d) }
+	const work = 30 * time.Millisecond
+	if err := rooms.Locked(ctx, room, func(context.Context, *store.LockedRoom) error {
+		time.Sleep(work)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	boom := errors.New("boom")
+	if err := rooms.Locked(ctx, room, func(context.Context, *store.LockedRoom) error { return boom }); !errors.Is(err, boom) {
+		t.Fatal(err)
+	}
+	_ = rooms.Locked(ctx, id(0xee), func(context.Context, *store.LockedRoom) error { return nil })
+	if len(held) != 2 {
+		t.Fatalf("OnLockHeld called %d times; want 2 (commit and rollback, not the missing room)", len(held))
+	}
+	if held[0] < work {
+		t.Errorf("held %v; want at least the %v of work inside", held[0], work)
+	}
+}

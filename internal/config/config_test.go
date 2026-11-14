@@ -140,3 +140,24 @@ func TestRedactedDoesNotAliasHosts(t *testing.T) {
 		t.Fatal("Redacted aliased the hosts slice")
 	}
 }
+
+func TestMetricsAddr(t *testing.T) {
+	cfg, err := Load("", env(required))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Metrics.Addr != "" {
+		t.Errorf("metrics should default off, got %q", cfg.Metrics.Addr)
+	}
+	m := map[string]string{"KLACKS_METRICS_ADDR": "127.0.0.1:9090"}
+	for k, v := range required {
+		m[k] = v
+	}
+	if cfg, err = Load("", env(m)); err != nil || cfg.Metrics.Addr != "127.0.0.1:9090" {
+		t.Fatalf("metrics addr = %q, %v", cfg.Metrics.Addr, err)
+	}
+	m["KLACKS_METRICS_ADDR"] = "nope"
+	if _, err := Load("", env(m)); err == nil || !strings.Contains(err.Error(), "metrics.addr") {
+		t.Errorf("bad addr: err = %v", err)
+	}
+}

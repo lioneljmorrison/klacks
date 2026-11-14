@@ -281,6 +281,13 @@ func (m *Manager) slowDisconnect(c *Conn) {
 // backpressure (S-16).
 func (m *Manager) SlowDisconnects() int64 { return m.slowDisconnects.Load() }
 
+// Connections is the number of open client connections.
+func (m *Manager) Connections() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.conns)
+}
+
 // ping drops the connection when the peer stops answering pings.
 func (m *Manager) ping(ctx context.Context, c *Conn, log *slog.Logger) {
 	t := time.NewTicker(m.PingInterval)
