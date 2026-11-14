@@ -61,6 +61,11 @@ to UUIDs (see [Names](#names)).
   new session as a replay of an old one. Sessions are saved before every publish and after every
   delivery, so a crash can't make the CLI reuse a message key. `/send`
   watches a room live; `/join` or `/resume` replay its history.
+  Against a server with JWT auth (`auth.jwt`), pass `-token <jwt>` (or set
+  `KLACKS_TOKEN`) with `-user` and `-device` naming the token's `sub` and
+  `device_id`. Messaging works; the room commands don't, because the dev
+  room API exists only with the dev stub. In Go, `Client.SetTokenSource`
+  does the same for the reference client.
 - **The dev UI** — a browser client with full E2EE (X3DH + Double Ratchet
   in WebCrypto plus its own ChaCha20-Poly1305), served by the dev server
   itself at `GET /devui` (same origin, because `/ws` rejects cross-origin

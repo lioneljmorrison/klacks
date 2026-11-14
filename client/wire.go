@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -23,10 +24,14 @@ import (
 // Disconnect replaces the connection: the read loop restarts on a fresh
 // reader-done channel.
 func (c *Client) Dial(ctx context.Context) error {
-	url := "ws" + strings.TrimPrefix(c.base, "http") + "/ws?user=" + format(c.user) + "&device=" + format(c.device)
 	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	conn, resp, err := websocket.Dial(dialCtx, url, nil)
+	url := "ws" + strings.TrimPrefix(c.base, "http") + "/ws"
+	h := http.Header{}
+	if err := c.authHeaders(dialCtx, h); err != nil {
+		return err
+	}
+	conn, resp, err := websocket.Dial(dialCtx, url, &websocket.DialOptions{HTTPHeader: h})
 	if err != nil {
 		return fmt.Errorf("dial /ws: %w", err)
 	}

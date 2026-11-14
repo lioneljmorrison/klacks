@@ -49,6 +49,8 @@ func main() {
 		name    = flag.String("name", "testchat", "display label used in the prompt")
 		fresh   = flag.Bool("fresh", false, "discard this device's saved keys and generate new ones")
 		debug   = flag.Bool("debug", false, "verbose diagnostics on stderr")
+		token   = flag.String("token", os.Getenv("KLACKS_TOKEN"),
+			"bearer token (JWT) for a server with auth.jwt; its sub and device_id must match -user and -device (default $KLACKS_TOKEN)")
 	)
 	flag.Parse()
 
@@ -124,6 +126,7 @@ func main() {
 		user:    user,
 		device:  device,
 		debug:   *debug,
+		token:   *token,
 		httpc:   &http.Client{},
 		rooms:   make(map[[16]byte]*roomInfo),
 		keys:    ks,
@@ -162,6 +165,9 @@ type app struct {
 	device [16]byte
 	debug  bool
 	httpc  *http.Client
+	// token, when set, is the bearer token for every request (S-44);
+	// unset, testchat speaks the dev stub's identity claims.
+	token string
 
 	// keys and keyPath back this device's persisted key material; keys is
 	// re-saved whenever the client's prekeys change (/replenish).
@@ -222,6 +228,10 @@ func (a *app) run(ctx context.Context, log *slog.Logger) error {
 	// restoring them is what lets their messages decrypt after a restart.
 	if err := restoreSessions(c, a.keyPath); err != nil {
 		return fmt.Errorf("saved sessions unusable (%w); run with -fresh to start over", err)
+	}
+	if a.token != "" {
+		tok := a.token
+		c.SetTokenSource(func(context.Context) (string, error) { return tok, nil })
 	}
 	// Save before every publish: see saveState.
 	c.SetBeforePublish(a.saveState)
@@ -403,8 +413,9 @@ func (a *app) shutdown(pumpDone <-chan struct{}) error {
 	return nil
 }
 
-// rest does one JSON REST call against the dev server with this device's
-// identity headers — the same dev auth the prekey endpoints use.
+// rest does one JSON REST call against the server with this device's
+// credentials: the bearer token if -token was given, else the dev stub's
+// identity headers — the same auth the prekey endpoints use.
 func (a *app) rest(ctx context.Context, method, path string, body, out any) error {
 	var rdr io.Reader
 	if body != nil {
@@ -418,8 +429,12 @@ func (a *app) rest(ctx context.Context, method, path string, body, out any) erro
 	if err != nil {
 		return err
 	}
-	req.Header.Set("X-Klacks-User", uuidString(a.user))
-	req.Header.Set("X-Klacks-Device", uuidString(a.device))
+	if a.token != "" {
+		req.Header.Set("Authorization", "Bearer "+a.token)
+	} else {
+		req.Header.Set("X-Klacks-User", uuidString(a.user))
+		req.Header.Set("X-Klacks-Device", uuidString(a.device))
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
