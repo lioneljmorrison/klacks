@@ -63,7 +63,11 @@ func setup(t *testing.T) (chatv1.ChatServiceClient, *chat.Service) {
 	t.Cleanup(svc.Close)
 
 	lis := bufconn.Listen(1024 * 1024)
-	gs := grpc.NewServer()
+	tokens, err := grpcapi.NewServiceTokens(serviceToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gs := grpc.NewServer(tokens.ServerOptions()...)
 	chatv1.RegisterChatServiceServer(gs, grpcapi.New(svc))
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
@@ -73,6 +77,7 @@ func setup(t *testing.T) (chatv1.ChatServiceClient, *chat.Service) {
 			return lis.DialContext(ctx)
 		}),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithPerRPCCredentials(bearer(serviceToken)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -271,3 +276,15 @@ func TestClientSubscribeStream(t *testing.T) {
 		t.Errorf("short room_id: code = %s, want InvalidArgument", got)
 	}
 }
+
+const serviceToken = "integration-test-service-token"
+
+// bearer sends a service token on every RPC. It does not require transport
+// security, since the test runs over an in-memory listener.
+type bearer string
+
+func (b bearer) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + string(b)}, nil
+}
+
+func (bearer) RequireTransportSecurity() bool { return false }

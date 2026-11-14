@@ -8,16 +8,59 @@ the frames. The Go definitions are in `internal/protocol`; keep the two in step.
 `GET /ws` upgrades to a WebSocket. The client must be authenticated before
 the upgrade; a failed authentication is a plain `401` and no socket is opened.
 
-Until real authentication lands, a dev server (`env=dev`) trusts the identity
-the client claims, either as headers or, for browsers, which cannot set
-WebSocket headers, as query parameters:
+### JWT (any env)
+
+A server configured with `auth.jwt` (see `.env.example`) verifies a bearer
+token issued by the embedder's identity provider. klacks never issues
+tokens. The token is a JWT signed with Ed25519 (`alg: EdDSA`, RFC 8037); no
+other algorithm is accepted. Its claims:
+
+| Claim       | Required | Value                                         |
+|-------------|----------|-----------------------------------------------|
+| `iss`       | yes      | equal to `auth.jwt.issuer`                    |
+| `aud`       | yes      | contains `auth.jwt.audience`                  |
+| `exp`       | yes      | expiry; 30 s clock skew allowed (also `nbf`, `iat`) |
+| `sub`       | yes      | user UUID                                     |
+| `device_id` | yes      | device UUID                                   |
+
+Send it as `Authorization: Bearer <token>`. Browsers cannot set WebSocket
+headers, so on the `/ws` upgrade only, the token may instead ride in the
+`access_token` query parameter. If a request also names a user or device
+the dev way (below), it must name the token's, or the request is a `401`.
+
+`/ws` accepts upgrades from the server's own origin. A browser app served
+from another origin needs that origin in `auth.allowed_origins`
+(`KLACKS_AUTH_ALLOWED_ORIGINS`, comma-separated); any other cross-origin
+upgrade is a `403`. Each entry is a host pattern matched with Go's
+`path.Match` against the `Origin` host (`app.example.com`,
+`*.example.com`), or against `scheme://host` when it has a scheme
+(`https://app.example.com`). The list is only accepted with `auth.jwt`.
+The same origins may call the prekey bundle API cross-origin: it answers
+their `OPTIONS` preflight (allowing the route's method and the
+`Authorization` and `Content-Type` headers, without credentials) and sets
+`Access-Control-Allow-Origin` on their responses. Other origins get no CORS
+headers, so the browser blocks the call.
+
+The token is checked once, at the upgrade. A connection is not closed when
+its token later expires; the next reconnect needs a fresh one. The prekey
+bundle API (`/v1/device/...`, `/v1/users/...`) takes the same header.
+
+### Dev stub (`env=dev` without `auth.jwt`)
+
+A dev server trusts the identity the client claims, either as headers or,
+for browsers, which cannot set WebSocket headers, as query parameters:
 
 | Header            | Query parameter | Value          |
 |-------------------|-----------------|----------------|
 | `X-Klacks-User`   | `user`          | user UUID      |
 | `X-Klacks-Device` | `device`        | device UUID    |
 
-Servers in any other env do not serve `/ws` yet.
+The dev stub keeps `/ws` same-origin (`auth.allowed_origins` needs
+`auth.jwt`).
+
+The dev UI (`/devui`) and dev room endpoints (`/v1/dev/rooms`) exist only
+with the dev stub. A server in any other env without `auth.jwt` does not
+serve `/ws` or the prekey bundle API.
 
 The server pings every connection. A client that stops answering pings is
 disconnected; it should reconnect and `resume`.
