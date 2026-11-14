@@ -257,6 +257,7 @@ const (
 	CodeForbidden          = "forbidden"
 	CodeRoomNotFound       = "room_not_found"
 	CodeInvalidArgument    = "invalid_argument"
+	CodeRateLimited        = "rate_limited"
 	CodeInternal           = "internal"
 )
 
@@ -273,6 +274,7 @@ var codes = []struct {
 	{core.ErrForbidden, CodeForbidden, false},
 	{core.ErrRoomNotFound, CodeRoomNotFound, false},
 	{core.ErrInvalidArgument, CodeInvalidArgument, false},
+	{core.ErrRateLimited, CodeRateLimited, false},
 }
 
 // ErrorFor maps err to an error frame. A decode error keeps its full text,

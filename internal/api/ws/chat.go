@@ -22,6 +22,7 @@ package ws
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -500,6 +501,10 @@ func (m *Manager) ack(c *Conn, f *protocol.Ack) {
 // resumed delivery like everyone else's. On failure the sender gets an error
 // frame naming its room and message.
 func (m *Manager) doPublish(ctx context.Context, c *Conn, f *protocol.Publish, log *slog.Logger) {
+	if !m.PublishPerUser.Allow(c.id.UserID) {
+		m.replyError(c, fmt.Errorf("publish: user: %w", core.ErrRateLimited), f, log)
+		return
+	}
 	p := core.Payload{
 		MessageID:  store.UUID(f.MessageID),
 		DeviceID:   store.UUID(f.DeviceID),

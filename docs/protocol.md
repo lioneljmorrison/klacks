@@ -170,9 +170,25 @@ it answers when the server knows them (`message_id` for a publish).
 | `forbidden`           | The user's role does not allow the action.                 |
 | `room_not_found`      | The room does not exist.                                   |
 | `invalid_argument`    | A request argument is invalid.                             |
+| `rate_limited`        | A publish limit refused it (see [Rate limits](#rate-limits)); retry later. |
 | `internal`            | Server error. Details are logged, not sent.                |
 
 `code` values are stable; `message` is for people and may change.
+
+## Rate limits
+
+A server limits each user's publish frames, each room's publishes and each
+user's connection attempts with in-memory token buckets (per server process;
+see `KLACKS_RATELIMIT_*` in `.env.example`). A refused publish gets a
+`rate_limited` error frame naming its room and message, and nothing is
+stored. Retry it after backing off. The room limit only counts publishes
+from members, so a non-member cannot use up a room's budget. A refused
+connection attempt is a plain `429 Too Many Requests` with `Retry-After`,
+before the upgrade.
+
+Pairwise encryption makes one typed message cost one publish per recipient
+device, so the default bursts are sized for a group's fan-out, not for
+single messages.
 
 ## Backpressure
 

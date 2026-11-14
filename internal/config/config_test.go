@@ -140,3 +140,57 @@ func TestRedactedDoesNotAliasHosts(t *testing.T) {
 		t.Fatal("Redacted aliased the hosts slice")
 	}
 }
+
+func TestRateLimitDefaultsAndEnv(t *testing.T) {
+	cfg, err := Load("", env(required))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RateLimit.PublishUser.Off() || cfg.RateLimit.PublishRoom.Off() || cfg.RateLimit.ConnectUser.Off() {
+		t.Fatalf("limits should default on: %+v", cfg.RateLimit)
+	}
+	m := map[string]string{
+		"KLACKS_RATELIMIT_PUBLISH_USER_RATE":  "5",
+		"KLACKS_RATELIMIT_PUBLISH_USER_BURST": "50",
+		"KLACKS_RATELIMIT_PUBLISH_ROOM_RATE":  "0",
+		"KLACKS_RATELIMIT_PUBLISH_ROOM_BURST": "0",
+		"KLACKS_RATELIMIT_CONNECT_USER_RATE":  "0.5",
+		"KLACKS_RATELIMIT_CONNECT_USER_BURST": "3",
+	}
+	for k, v := range required {
+		m[k] = v
+	}
+	cfg, err = Load("", env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rl := cfg.RateLimit
+	if rl.PublishUser.Rate != 5 || rl.PublishUser.Burst != 50 || !rl.PublishRoom.Off() || rl.ConnectUser.Rate != 0.5 || rl.ConnectUser.Burst != 3 {
+		t.Errorf("rate limits = %+v", rl)
+	}
+}
+
+func TestRateLimitValidate(t *testing.T) {
+	m := map[string]string{
+		"KLACKS_RATELIMIT_PUBLISH_USER_BURST": "0",
+		"KLACKS_RATELIMIT_CONNECT_USER_RATE":  "fast",
+	}
+	for k, v := range required {
+		m[k] = v
+	}
+	_, err := Load("", env(m))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{"KLACKS_RATELIMIT_CONNECT_USER_RATE"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %s", err, want)
+		}
+	}
+	cfg := Default()
+	cfg.Postgres.DSN, cfg.Scylla.Hosts, cfg.Log.Format = "x", []string{"a"}, "text"
+	cfg.RateLimit.PublishUser.Burst = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "rate_limit.publish_user") {
+		t.Errorf("err = %v; want rate_limit.publish_user", err)
+	}
+}
