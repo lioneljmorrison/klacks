@@ -6,6 +6,7 @@ package client
 // end-to-end integration test (S-26).
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -309,4 +310,81 @@ func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 // testLogger discards; NewServer requires a logger.
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// A peer that re-initiates has abandoned its old session — the browser
+// drops a session whose chain failed to open and starts over. Its new
+// initiation must carry the reply whatever the ephemerals compare to: the
+// tie-break settles simultaneous initiations from both sides, not one
+// side starting again.
+func TestPeerReinitiationAlwaysWins(t *testing.T) {
+	ctx := context.Background()
+	base := restDevices(t)
+	dave, err := NewClient(base, [16]byte{4}, [16]byte{0xD1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	carol, err := NewClient(base, [16]byte{3}, [16]byte{0xC1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dave.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := carol.Register(ctx); err != nil {
+		t.Fatal(err)
+	}
+	room := [16]byte{9}
+	peerCarol := Peer{User: carol.user, Device: carol.device}
+	peerDave := Peer{User: dave.user, Device: dave.device}
+	key := sessionKey{room: room, peer: carol.device}
+	// exchange delivers one sealed message to both sides (the sender's
+	// own echo included) and checks the recipient opens it.
+	exchange := func(seq int64, from, to *Client, e encryptResult) error {
+		from.handleDeliver(deliverOf(room, seq, from, e))
+		to.handleDeliver(deliverOf(room, seq, from, e))
+		return inbox(t, to).Err
+	}
+	e, err := dave.sealFor(ctx, room, peerCarol, []byte("hi ladies"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exchange(1, dave, carol, e); err != nil {
+		t.Fatal(err)
+	}
+	if e, err = carol.sealFor(ctx, room, peerDave, []byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if err := exchange(2, carol, dave, e); err != nil {
+		t.Fatal(err)
+	}
+	seq := int64(3)
+	for i := 0; i < 8; i++ {
+		// Dave abandons his session and starts over, as the browser does.
+		dave.mu.Lock()
+		old := dave.sessions[key].initEph
+		delete(dave.sessions, key)
+		for fk := range dave.fallbacks {
+			delete(dave.fallbacks, fk)
+		}
+		dave.fallbackOrder = nil
+		dave.mu.Unlock()
+		e, err := dave.sealFor(ctx, room, peerCarol, []byte("again"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := exchange(seq, dave, carol, e); err != nil {
+			t.Fatalf("carol: %v", err)
+		}
+		seq++
+		e, err = carol.sealFor(ctx, room, peerDave, []byte("reply"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := exchange(seq, carol, dave, e); err != nil {
+			newer := bytes.Compare(dave.sessions[key].initEph[:], old[:]) > 0
+			t.Fatalf("round %d: carol replied over the session dave abandoned (new ephemeral sorts higher: %v): %v", i, newer, err)
+		}
+		seq++
+	}
 }

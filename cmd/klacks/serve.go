@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/lioneljmorrison/klacks/internal/api/devui"
 	"github.com/lioneljmorrison/klacks/internal/api/httpapi"
 	"github.com/lioneljmorrison/klacks/internal/api/ws"
 	"github.com/lioneljmorrison/klacks/internal/auth"
@@ -43,7 +44,9 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		mgr       *ws.Manager
 		wsHandler http.Handler
 		devices   *httpapi.Devices
+		devRooms  *httpapi.DevRooms
 	)
+	dev := clientAuthenticator(cfg.Env) != nil
 	if a := clientAuthenticator(cfg.Env); a != nil {
 		rooms := store.NewRooms(pg, roomLockTimeout)
 		messages := store.NewScyllaMessages(scylla)
@@ -54,12 +57,46 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		svc := core.New(rooms, messages, mgr.Deliver, mgr.MemberRemoved)
 		mgr.Chat = svc
 		wsHandler = mgr
+		// The dev room endpoints shim core's room management over REST,
+		// so the browser test client can create and populate rooms.
+		if dev {
+			devRooms = httpapi.NewDevRooms(a, roomAdmin{svc: svc}, log)
+		}
 		log.Warn("client auth is the dev stub: any claimed identity is trusted")
 	} else {
 		log.Warn("no client authenticator for this env; /ws and the prekey bundle API are not served", "env", cfg.Env)
 	}
 
+	handler := http.Handler(nil)
+	// The dev UI rides the dev gate too: it exists for testing against the
+	// dev authenticator and mounts nowhere else.
+	if dev {
+		ui, err := devui.New()
+		if err != nil {
+			return err
+		}
+		handler = ui
+	}
+
 	srv := httpapi.NewServer(cfg.HTTP, health, wsHandler, devices, log)
+	// The browser client must share the server's origin (/ws rejects
+	// cross-origin upgrades), so the dev tooling is mounted on the mux the
+	// server serves rather than a separate listener. A wrapper mux routes
+	// /devui and /v1/dev/rooms to their handlers and everything else to the
+	// server's routes; the server's graceful shutdown and Handler() keep
+	// working through it.
+	if handler != nil || devRooms != nil {
+		outer := http.NewServeMux()
+		if handler != nil {
+			outer.Handle("GET /devui", handler)
+			outer.Handle("GET /devui/", handler)
+		}
+		if devRooms != nil {
+			devRooms.Register(outer)
+		}
+		outer.Handle("/", srv.Handler())
+		srv.UseHandler(outer)
+	}
 	err = srv.ListenAndServe(ctx)
 	if mgr != nil {
 		// Shutdown does not track WebSockets: close them now that HTTP has
@@ -77,6 +114,31 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 // (store.NewRooms). It must be longer than the ScyllaDB write timeout, since
 // a publish holds the lock across its ScyllaDB write.
 const roomLockTimeout = 10 * time.Second
+
+// roomAdmin adapts core.Service's typed Kind/Role to the dev rooms
+// handlers' string form.
+type roomAdmin struct {
+	svc *core.Service
+}
+
+func (a roomAdmin) CreateRoomWithID(ctx context.Context, room store.UUID, kind string, creator store.UUID) error {
+	return a.svc.CreateRoomWithID(ctx, room, core.Kind(kind), creator)
+}
+
+func (a roomAdmin) AddMember(ctx context.Context, room, actor, user store.UUID, role string) error {
+	if role == "" {
+		role = string(core.RoleMember)
+	}
+	return a.svc.AddMember(ctx, room, actor, user, core.Role(role))
+}
+
+func (a roomAdmin) RemoveMember(ctx context.Context, room, actor, user store.UUID) error {
+	return a.svc.RemoveMember(ctx, room, actor, user)
+}
+
+func (a roomAdmin) Members(ctx context.Context, room store.UUID) ([]store.UUID, error) {
+	return a.svc.Members(ctx, room)
+}
 
 // clientAuthenticator returns the authenticator for client connections, or
 // nil if there is none. The dev stub trusts any claimed identity, so it is

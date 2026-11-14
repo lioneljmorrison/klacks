@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>klacks dev UI — test client</title>
+<link rel="stylesheet" href="/devui/style.css">
+</head>
+<body>
+<header>
+  <h1>klacks</h1>
+  <span id="conn-state" class="state disconnected">offline</span>
+</header>
+
+<main>
+  <!-- Step 1: who are you -->
+  <section id="step-user" class="step">
+    <h2>Who are you?</h2>
+    <form id="form-user" class="row">
+      <input id="your-name" placeholder="your name, e.g. bob" autofocus autocomplete="off">
+      <button id="btn-start" class="primary" type="submit">Start</button>
+    </form>
+    <button id="btn-continue" type="button" hidden></button>
+    <p id="user-error" class="error" hidden></p>
+    <p class="small hint">Keys are stored in this browser, so the same name is the same person every time.</p>
+  </section>
+
+  <!-- Step 2: pick a room -->
+  <section id="step-room" class="step" hidden>
+    <p class="hi" id="hello-line"></p>
+    <form id="form-room" class="row">
+      <input id="room-name" placeholder="room name, e.g. standup" autofocus autocomplete="off">
+      <button id="btn-open" class="primary" type="submit">Open</button>
+    </form>
+    <p id="room-error" class="error" hidden></p>
+    <p class="small hint">Opens the room, creating it if it doesn't exist yet.</p>
+    <div id="recent-rooms"></div>
+  </section>
+
+  <!-- Step 3: chat -->
+  <section id="step-chat" class="step" hidden>
+    <div class="chat-head">
+      <button id="btn-rooms" type="button" title="back to rooms">‹ rooms</button>
+      <span id="room-title"></span>
+      <span id="member-line" class="small"></span>
+    </div>
+    <form id="form-invite" class="row invite-row">
+      <input id="invite-name" placeholder="invite someone, e.g. alice" autocomplete="off">
+      <button type="submit">Invite</button>
+    </form>
+    <div id="messages" aria-live="polite"></div>
+    <form id="form-chat" class="row chat-row">
+      <input id="chat-input" placeholder="type a message…" autocomplete="off">
+      <button class="primary" type="submit">Send</button>
+    </form>
+  </section>
+
+  <details id="debug">
+    <summary>debug log</summary>
+    <label class="small"><input type="checkbox" id="show-frames"> show raw frames</label>
+    <div id="log"></div>
+  </details>
+</main>
+
+<footer class="small">
+  Test client for the klacks wire protocol (v1) with pairwise E2EE, interoperating
+  with the Go reference client (<code>client/</code>). Not a product.
+</footer>
+
+<script type="module" src="/devui/js/app.mjs"></script>
+</body>
+</html>

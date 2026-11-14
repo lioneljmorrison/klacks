@@ -38,6 +38,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	c.conn = conn
 	c.readCtx, c.readCancel = context.WithCancel(context.WithoutCancel(ctx))
 	c.readerDone = make(chan struct{})
+	c.readStarted = true
 	c.mu.Unlock()
 	go c.readLoop()
 	return nil
@@ -59,9 +60,14 @@ func (c *Client) Disconnect() {
 	}
 }
 
-// Close closes the connection and the client's channels.
+// Close closes the connection and the client's channels. A client that
+// never dialed has no read loop to wait for; closing still empties the
+// channels its callers may be selecting on.
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		started := c.readStarted
+		c.mu.Unlock()
 		if c.readCancel != nil {
 			c.readCancel()
 		}
@@ -69,8 +75,12 @@ func (c *Client) Close() {
 			_ = c.conn.Close(websocket.StatusNormalClosure, "")
 		}
 		// The read loop is the only sender on Inbox and Errs: wait for it
-		// to exit before closing what it feeds.
-		<-c.readerDone
+		// to exit before closing what it feeds — but only when one is
+		// running, or Close would block forever on a client that never
+		// dialed.
+		if started {
+			<-c.readerDone
+		}
 		close(c.done)
 		close(c.Inbox)
 		close(c.Errs)
@@ -121,6 +131,14 @@ func (c *Client) Send(ctx context.Context, room [16]byte, peers []Peer, plaintex
 		e, err := c.sealFor(ctx, room, p, plaintext)
 		if err != nil {
 			return err
+		}
+		c.mu.Lock()
+		save := c.beforePublish
+		c.mu.Unlock()
+		if save != nil {
+			if err := save(); err != nil {
+				return err
+			}
 		}
 		if err := c.publish(ctx, room, e); err != nil {
 			return err

@@ -72,6 +72,20 @@ func (s *Service) CreateRoom(ctx context.Context, kind Kind, creator store.UUID)
 	return s.rooms.CreateRoom(ctx, string(kind), creator, string(RoleOwner))
 }
 
+// CreateRoomWithID creates a room with the caller's chosen ID — the UUID a
+// human-readable name resolved to — with creator as its owner. The caller
+// validates the ID is not the zero UUID; an ID that already exists fails
+// with the driver's unique-violation error.
+func (s *Service) CreateRoomWithID(ctx context.Context, room store.UUID, kind Kind, creator store.UUID) error {
+	if !kind.valid() {
+		return fmt.Errorf("create room: kind %q: %w", kind, ErrInvalidArgument)
+	}
+	if room == (store.UUID{}) {
+		return fmt.Errorf("create room: room id is required: %w", ErrInvalidArgument)
+	}
+	return s.rooms.CreateRoomWithID(ctx, room, string(kind), creator, string(RoleOwner))
+}
+
 // AddMember adds user to room with role, if actor may grant it.
 func (s *Service) AddMember(ctx context.Context, room, actor, user store.UUID, role Role) error {
 	if !role.valid() {

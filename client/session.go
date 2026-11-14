@@ -234,15 +234,22 @@ func (c *Client) sessionForPrekey(room [16]byte, key sessionKey, sender [16]byte
 	return ns, nil
 }
 
-// newcomerWins settles two competing X3DH initiations: the lower
-// (identity DH key, ephemeral) pair wins, the same verdict on both sides.
-// in is the incoming initiation; active records the one the active
-// session was established by — the device's own when it initiated.
+// newcomerWins settles two competing X3DH initiations. in is the incoming
+// initiation; active records the one the active session was established
+// by — the device's own when it initiated.
+//
+// When the peer that initiated the active session initiates again, it has
+// abandoned that session (it lost its state, or dropped a session whose
+// chain stopped opening), so the newcomer always wins: replying over the
+// old session would seal into one the peer no longer holds. Redeliveries
+// of earlier initiations never reach here; sessionForPrekey answers them
+// first.
+//
+// Otherwise both devices initiated at once, and the lower (identity DH
+// key, ephemeral) pair wins, the same verdict on both sides.
 func newcomerWins(in PrekeyHeader, active *session) bool {
 	if in.IdentityDH == active.initID {
-		// The same initiator re-initiated: the comparison falls to the
-		// ephemerals, deterministic on both sides.
-		return bytes.Compare(in.Ephemeral[:], active.initEph[:]) < 0
+		return true
 	}
 	if c := bytes.Compare(in.IdentityDH[:], active.initID[:]); c != 0 {
 		return c < 0
