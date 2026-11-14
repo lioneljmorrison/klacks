@@ -5,6 +5,7 @@ go 1.27.4
 require (
 	github.com/apache/cassandra-gocql-driver/v2 v2.1.2
 	github.com/coder/websocket v1.8.15
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/prometheus/client_golang v1.25.0

@@ -2,8 +2,8 @@ package httpapi
 
 // Prekey bundle endpoints (S-22) over the device store. The server validates
 // shapes only — sizes, ids, counts; it never sees private key material and
-// never verifies signatures. Identity comes from the authenticator, the dev
-// stub until real auth (S-31): a client registers only its own (user, device),
+// never verifies signatures. Identity comes from the authenticator (JWT, or
+// the dev stub in env dev): a client registers only its own (user, device),
 // but may fetch any user's bundle, which is what session initiation needs.
 
 import (
@@ -34,6 +34,12 @@ type DeviceStore interface {
 // Devices serves the prekey bundle endpoints. A nil authenticator is not
 // allowed: build Devices only when there is one.
 type Devices struct {
+	// AllowedOrigins are the cross-origin browser apps allowed to call the
+	// endpoints (auth.allowed_origins, S-50), in the /ws pattern form. Empty
+	// keeps them same-origin. As with /ws, set it only with JWT auth. It
+	// must be set before Register.
+	AllowedOrigins []string
+
 	auth  auth.Authenticator
 	store DeviceStore
 	log   *slog.Logger
@@ -54,10 +60,23 @@ func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // Register adds the endpoints to mux.
 func (d *Devices) Register(mux *http.ServeMux) {
-	mux.HandleFunc("PUT /v1/device/bundle", d.upload)
-	mux.HandleFunc("POST /v1/device/prekeys", d.replenish)
-	mux.HandleFunc("GET /v1/users/{user}/devices/{device}/bundle", d.fetchBundle)
-	mux.HandleFunc("GET /v1/users/{user}/devices", d.list)
+	for _, rt := range []struct {
+		method, path string
+		h            http.HandlerFunc
+	}{
+		{http.MethodPut, "/v1/device/bundle", d.upload},
+		{http.MethodPost, "/v1/device/prekeys", d.replenish},
+		{http.MethodGet, "/v1/users/{user}/devices/{device}/bundle", d.fetchBundle},
+		{http.MethodGet, "/v1/users/{user}/devices", d.list},
+	} {
+		if len(d.AllowedOrigins) == 0 {
+			mux.HandleFunc(rt.method+" "+rt.path, rt.h)
+			continue
+		}
+		actual, preflight := cors(d.AllowedOrigins, rt.method, rt.h)
+		mux.HandleFunc(rt.method+" "+rt.path, actual)
+		mux.HandleFunc(http.MethodOptions+" "+rt.path, preflight)
+	}
 }
 
 // uploadRequest is one bundle upload: the full bundle plus the initial batch
