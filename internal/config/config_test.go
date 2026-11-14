@@ -182,3 +182,72 @@ func TestAuthJWTNeedsIssuerAndAudience(t *testing.T) {
 		}
 	}
 }
+
+// S-45: the gRPC listener's settings.
+func TestGRPCFromEnv(t *testing.T) {
+	m := map[string]string{
+		"KLACKS_GRPC_ADDR":           ":9090",
+		"KLACKS_GRPC_SERVICE_TOKENS": "tok-a, tok-b",
+		"KLACKS_GRPC_ACTOR":          "a0000000-0000-4000-8000-0000000000a1",
+		"KLACKS_GRPC_TLS_CERT_FILE":  "/c.pem",
+		"KLACKS_GRPC_TLS_KEY_FILE":   "/k.pem",
+	}
+	for k, v := range required {
+		m[k] = v
+	}
+	cfg, err := Load("", env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := cfg.GRPC
+	if g.Addr != ":9090" || strings.Join(g.ServiceTokens, "|") != "tok-a|tok-b" ||
+		g.Actor != "a0000000-0000-4000-8000-0000000000a1" || g.TLSCertFile != "/c.pem" || g.TLSKeyFile != "/k.pem" {
+		t.Errorf("grpc = %+v", g)
+	}
+	if !g.Enabled() || (GRPC{}).Enabled() {
+		t.Error("Enabled wrong")
+	}
+	r := cfg.Redacted()
+	if strings.Contains(strings.Join(r.GRPC.ServiceTokens, ""), "tok") {
+		t.Errorf("Redacted shows service tokens: %q", r.GRPC.ServiceTokens)
+	}
+	if cfg.GRPC.ServiceTokens[0] != "tok-a" {
+		t.Error("Redacted changed the original's tokens")
+	}
+}
+
+func TestGRPCRejected(t *testing.T) {
+	ok := GRPC{Addr: ":9090", ServiceTokens: []string{"t"}, Actor: "a0000000-0000-4000-8000-0000000000a1"}
+	cases := map[string]func(g *GRPC){
+		"bad addr":    func(g *GRPC) { g.Addr = "9090" },
+		"no tokens":   func(g *GRPC) { g.ServiceTokens = nil },
+		"empty token": func(g *GRPC) { g.ServiceTokens = []string{""} },
+		"no actor":    func(g *GRPC) { g.Actor = "" },
+		"bad actor":   func(g *GRPC) { g.Actor = "bob" },
+		"zero actor":  func(g *GRPC) { g.Actor = "00000000-0000-0000-0000-000000000000" },
+		"cert no key": func(g *GRPC) { g.TLSCertFile = "/c.pem" },
+		"key no cert": func(g *GRPC) { g.TLSKeyFile = "/k.pem" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Postgres.DSN = "x"
+			cfg.Scylla.Hosts = []string{"a"}
+			cfg.Log.Format = "text"
+			cfg.GRPC = ok
+			cfg.GRPC.ServiceTokens = append([]string(nil), ok.ServiceTokens...)
+			mutate(&cfg.GRPC)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "grpc.") {
+				t.Errorf("err = %v; want a grpc.* error", err)
+			}
+		})
+	}
+	cfg := Default()
+	cfg.Postgres.DSN = "x"
+	cfg.Scylla.Hosts = []string{"a"}
+	cfg.Log.Format = "text"
+	cfg.GRPC = ok
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("valid grpc: %v", err)
+	}
+}
