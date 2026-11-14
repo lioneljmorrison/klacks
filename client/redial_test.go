@@ -23,7 +23,7 @@ func TestReadLoopDoesNotFollowRedial(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.CloseNow()
+		defer func() { _ = conn.CloseNow() }()
 		if conns.Add(1) == 1 {
 			b, err := protocol.Encode(&protocol.Deliver{
 				RoomID: protocol.UUID{9}, Seq: 1, MessageID: protocol.UUID{1},
