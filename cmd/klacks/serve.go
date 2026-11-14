@@ -77,7 +77,9 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 			rooms.OnLockHeld = met.lockHeld
 			messages = met.timed(messages)
 		}
-		devices = httpapi.NewDevices(a, store.NewDevices(pg), log)
+		// The prekey API's store calls share the room calls' deadline
+		// (S-51), so a partitioned PostgreSQL answers 503, not a hang.
+		devices = httpapi.NewDevices(a, store.NewDevices(pg, roomLockTimeout), log)
 		mgr = ws.NewManager(a, log)
 		// Fan-out goes through the manager: after each commit the core
 		// hands the message to the hub (S-13).

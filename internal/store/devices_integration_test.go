@@ -30,7 +30,7 @@ func prekey(id int64) store.OneTimePrekey {
 
 func TestDevicesUploadAndFetch(t *testing.T) {
 	pool := dbtest.MigratedPostgres(t)
-	d := store.NewDevices(pool)
+	d := store.NewDevices(pool, 0)
 	user, device := store.UUID{1}, store.UUID{2}
 
 	if _, _, err := d.Bundle(t.Context(), user, device); !errors.Is(err, store.ErrDeviceNotFound) {
@@ -79,7 +79,7 @@ func takeOne(t *testing.T, d *store.Devices, user, device store.UUID) (store.Tak
 
 func TestDevicesUploadReplacesBundleAndPrekeys(t *testing.T) {
 	pool := dbtest.MigratedPostgres(t)
-	d := store.NewDevices(pool)
+	d := store.NewDevices(pool, 0)
 	user, device := store.UUID{1}, store.UUID{2}
 
 	if err := d.UploadBundle(t.Context(), user, device, bundle(1), []store.OneTimePrekey{prekey(1), prekey(2)}); err != nil {
@@ -98,7 +98,7 @@ func TestDevicesUploadReplacesBundleAndPrekeys(t *testing.T) {
 
 func TestDevicesReplenish(t *testing.T) {
 	pool := dbtest.MigratedPostgres(t)
-	d := store.NewDevices(pool)
+	d := store.NewDevices(pool, 0)
 	user, device := store.UUID{1}, store.UUID{2}
 
 	if err := d.UploadBundle(t.Context(), user, device, bundle(1), nil); err != nil {
@@ -121,7 +121,7 @@ func TestDevicesReplenish(t *testing.T) {
 
 func TestDevicesList(t *testing.T) {
 	pool := dbtest.MigratedPostgres(t)
-	d := store.NewDevices(pool)
+	d := store.NewDevices(pool, 0)
 	user := store.UUID{1}
 	if err := d.UploadBundle(t.Context(), user, store.UUID{2}, bundle(1), nil); err != nil {
 		t.Fatal(err)
@@ -151,7 +151,7 @@ func TestDevicesList(t *testing.T) {
 
 func TestDevicesConcurrentFetchesAreUnique(t *testing.T) {
 	pool := dbtest.MigratedPostgres(t)
-	d := store.NewDevices(pool)
+	d := store.NewDevices(pool, 0)
 	user, device := store.UUID{1}, store.UUID{2}
 	if err := d.UploadBundle(t.Context(), user, device, bundle(1), []store.OneTimePrekey{
 		prekey(1), prekey(2), prekey(3), prekey(4), prekey(5),
@@ -191,7 +191,7 @@ func TestDevicesConcurrentFetchesAreUnique(t *testing.T) {
 
 func TestDevicesUploadValidation(t *testing.T) {
 	pool := dbtest.MigratedPostgres(t)
-	d := store.NewDevices(pool)
+	d := store.NewDevices(pool, 0)
 	user, device := store.UUID{1}, store.UUID{2}
 
 	b := bundle(1)

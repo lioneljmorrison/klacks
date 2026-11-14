@@ -81,16 +81,32 @@ type Device struct {
 // Devices is the PostgreSQL store for devices and their prekey bundles
 // (S-22), with one-time prekey consumption (S-23).
 type Devices struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	timeout time.Duration
 }
 
 // NewDevices returns a Devices on a pool whose database is migrated.
-func NewDevices(pool *pgxpool.Pool) *Devices { return &Devices{pool: pool} }
+// timeout bounds each call as a client-side deadline (S-51), so a
+// partitioned PostgreSQL, which never answers, fails a call instead of
+// hanging it until its caller goes away. 0 disables it.
+func NewDevices(pool *pgxpool.Pool, timeout time.Duration) *Devices {
+	return &Devices{pool: pool, timeout: timeout}
+}
+
+// bounded returns ctx with the per-call deadline (see NewDevices).
+func (d *Devices) bounded(ctx context.Context) (context.Context, context.CancelFunc) {
+	if d.timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, d.timeout)
+}
 
 // UploadBundle upserts the device's bundle and its initial one-time prekeys.
 // A re-upload replaces the whole bundle — and discards the previous bundle's
 // one-time prekeys, which the new signed prekey cannot decrypt for.
 func (d *Devices) UploadBundle(ctx context.Context, user, device UUID, b Bundle, prekeys []OneTimePrekey) error {
+	ctx, cancel := d.bounded(ctx)
+	defer cancel()
 	if err := validateBundle(b); err != nil {
 		return fmt.Errorf("devices: %w: %w", ErrInvalidBundle, err)
 	}
@@ -127,6 +143,8 @@ func (d *Devices) UploadBundle(ctx context.Context, user, device UUID, b Bundle,
 // an id the device already holds replaces its key; clients upload fresh ids.
 // The device must be registered.
 func (d *Devices) AddOneTimePrekeys(ctx context.Context, user, device UUID, prekeys []OneTimePrekey) error {
+	ctx, cancel := d.bounded(ctx)
+	defer cancel()
 	if err := validatePrekeys(prekeys); err != nil {
 		return fmt.Errorf("devices: %w: %w", ErrInvalidBundle, err)
 	}
@@ -152,6 +170,8 @@ func (d *Devices) AddOneTimePrekeys(ctx context.Context, user, device UUID, prek
 // no one-time prekeys yields Taken.ID 0: the fetcher establishes its session
 // without the final DH. ErrDeviceNotFound when the device is unregistered.
 func (d *Devices) Bundle(ctx context.Context, user, device UUID) (Bundle, Taken, error) {
+	ctx, cancel := d.bounded(ctx)
+	defer cancel()
 	var (
 		b     Bundle
 		taken Taken
@@ -197,6 +217,8 @@ func (d *Devices) Bundle(ctx context.Context, user, device UUID) (Bundle, Taken,
 
 // ListDevices returns user's registered devices, ordered by device id.
 func (d *Devices) ListDevices(ctx context.Context, user UUID) ([]Device, error) {
+	ctx, cancel := d.bounded(ctx)
+	defer cancel()
 	rows, err := d.pool.Query(ctx, `SELECT device_id, identity_key, identity_dh_key, signed_prekey_id, signed_prekey, signed_prekey_sig, last_seen_at
 		FROM devices WHERE user_id = $1 ORDER BY device_id`, user)
 	if err != nil {
