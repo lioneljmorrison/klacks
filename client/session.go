@@ -183,7 +183,7 @@ func (c *Client) unseal(room [16]byte, d deliver) ([]byte, error) {
 			// one until the prekey message arrives and establishes the
 			// session; the ratchet's skipped-key handling then orders
 			// them.
-			c.pending[key] = append(c.pending[key], d)
+			c.pending[key] = stash(c.pending[key], d)
 			return nil, errPending
 		}
 		if h.dh != s.ratchet.dhRemote {
