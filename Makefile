@@ -175,3 +175,8 @@ cover: ## Run unit tests with a coverage report
 
 .PHONY: check
 check: vet lint test ## vet + lint + unit tests (what CI runs)
+
+.PHONY: perf
+perf: build ## Performance gate: G-8 load test, fails on a miss (`make up` first; PERF_* knobs in scripts/perf.sh)
+	go build -trimpath -o $(BIN_DIR)/klacksload ./cmd/klacksload
+	scripts/perf.sh

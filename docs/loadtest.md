@@ -81,3 +81,53 @@ default pool.**
   watch `klacks_room_lock_held_seconds`.
 - Not covered: multiple server nodes, a remote database, rate limits (S-32
   limits are off on this branch's base).
+
+## Performance gate (S-53)
+
+`make perf` turns the load test into a pass/fail check. It builds
+`klacks` and `klacksload`, then `scripts/perf.sh`:
+
+1. applies migrations to the running stack (`make up` first);
+2. starts a dev server on `127.0.0.1:18080` (metrics `:19090`) with
+   `pool_max_conns=60` appended to `KLACKS_POSTGRES_DSN`;
+3. runs the G-8 profile with `-max-p99 200ms`;
+4. stops the server whatever the result, and exits with klacksload's
+   status. The report and server log go to `bin/perf/`.
+
+A run **fails** on any of: delivery p99 over the limit, a seq gap, an
+error frame, a publish write error, a slow-consumer disconnect, more than
+0.1% of expected deliveries missing (the drain window can cut off a few
+in flight; real loss also shows as a gap or a short resume), or a room
+that doesn't finish the resume phase.
+
+It runs locally, not in CI (GitHub's 4-vCPU runners can't carry 10k
+connections), and must pass before a `dev`→`main` PR merges. Every knob
+is an environment variable: `PERF_ROOMS`, `PERF_MEMBERS`, `PERF_RATE`,
+`PERF_DURATION`, `PERF_WARMUP`, `PERF_MAX_P99`, `PERF_POOL`,
+`PERF_HTTP_PORT`, `PERF_METRICS_PORT`, `PERF_OUT`. With prebuilt
+binaries, run `KLACKS=… KLACKSLOAD=… scripts/perf.sh` directly.
+
+### Gate runs (2026-11-14)
+
+Each machine runs the server, generator, PostgreSQL 18 and ScyllaDB
+2026.3 (`--smp 1 --memory 750M`, as in `compose.yaml`) together, alongside
+its usual services.
+
+| Machine | Hardware | Profile | Delivery p99 | Lock hold p50 / p99 | Pool peak | Result |
+|---|---|---|---|---|---|---|
+| M4 | Apple M4, 10 cores, 16 GB; databases in a colima VM (4 CPU, 4 GB) | G-8: 10k conns, 1k msg/s | 6.2 ms | ≤ 2 ms / ≤ 8 ms | 50 / 60 | **pass** |
+| lab-hermes | Intel i3-6100T, 4 threads, 7 GB, Debian 13 | G-8 | 8.63 s | ≤ 64 ms / ≤ 128 ms | 60 / 60 | fail: p99, 39,019 of 540,009 still in flight |
+| lab-hermes | same | 1k conns, 100 msg/s, 30 s | 22 ms | ≤ 8 ms / ≤ 64 ms | 4 / 60 | **pass** |
+| nas | AMD A10-5700, 4 cores, 30 GB, Debian 13 | — | — | — | — | not run: ScyllaDB exits with SIGILL (illegal instruction) on this CPU, which has AVX but not AVX2; the exact instruction was not identified |
+
+On lab-hermes the full profile saturates the pool and the room lock
+(p50 64 ms), so publishes queue and delivery falls seconds behind; no
+seq gaps, no error frames, and every room resumed, so nothing was lost.
+klacksload now dials 100 at a time on every platform: at the earlier 200,
+a local server on macOS reset connections (`kern.ipc.somaxconn` is 128
+there).
+
+Code: M4 ran `make perf` at 80e1325 (100 dials); lab-hermes ran
+`scripts/perf.sh` with cross-compiled binaries from 43a8503 (200 dials;
+no Go on that machine). The reports say "commit unknown" because the
+trees were copied without `.git`.
