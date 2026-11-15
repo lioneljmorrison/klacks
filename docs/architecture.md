@@ -25,7 +25,7 @@ flowchart TB
         subgraph Transports["internal/api"]
             HTTP["httpapi<br/>GET /healthz · /readyz<br/>PUT /v1/device/bundle<br/>POST /v1/device/prekeys<br/>GET /v1/users/{u}/devices[/{d}/bundle]"]
             WS["ws<br/>GET /ws — live chat"]
-            GRPC["grpcapi<br/>(adapter over pkg/chat,<br/>not served yet)"]
+            GRPC["grpcapi<br/>klacks.chat.v1.ChatService<br/>(service tokens)"]
         end
         Auth["internal/auth"]
         Protocol["internal/protocol<br/>wire frames"]
@@ -81,12 +81,15 @@ flowchart TB
 - **The server never sees plaintext.** Only `client/` (and real client apps)
   encrypt and decrypt. The server stores and relays ciphertext. Both sides
   speak the [klacks wire protocol](protocol.md).
-- **Two ways in.** Over the network, clients use `httpapi` for prekey bundles
-  and `ws` for messages. In-process, embedders call `pkg/chat`. Both paths end
-  in `internal/core`.
+- **Three ways in.** Over the network, clients use `httpapi` for prekey
+  bundles and `ws` for messages. Embedders call `pkg/chat` in-process, or
+  its gRPC mirror (`grpcapi`) from another process. All paths end in
+  `internal/core`.
 - **Split storage.** PostgreSQL holds rooms, devices, sequence numbers and
   prekey bundles. ScyllaDB holds messages.
-- **gRPC is not live yet.** `grpcapi` wraps `pkg/chat`, but `serve` does not
-  serve it.
+- **One core, two transports.** With `grpc.addr` set, `serve` runs the gRPC
+  API next to HTTP over the same core: its fan-out and member removals reach
+  both the WebSocket hub and the gRPC subscriptions, so each transport sees
+  the other's messages live.
 
 Test-only packages (`internal/testutil/dbtest`) are left out.
