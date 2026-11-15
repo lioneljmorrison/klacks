@@ -275,3 +275,26 @@ func TestReplenishSavesBeforeUpload(t *testing.T) {
 		t.Fatalf("uploaded %d time(s) although saving the keys failed: %s", uploads, out)
 	}
 }
+
+// S-42: after a restart, /join and /resume pick up where the device left
+// off — the last seq its restored client state consumed — not from 0, so
+// the room's history is not shown again.
+func TestResumePointFromRestoredState(t *testing.T) {
+	a, _ := testApp(t)
+	c, err := client.NewClient("http://test.invalid", [16]byte{1}, [16]byte{2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	room := [16]byte{9}
+	state := `{"v":2,"sessions":[],"fallbacks":[],"rooms":[{"room":[9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"started":true,"last_seq":7,"seen":[{"seq":7,"id":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}]}]}`
+	if err := c.RestoreState([]byte(state)); err != nil {
+		t.Fatal(err)
+	}
+	a.c = c
+	if got := a.resumePoint(room); got != 7 {
+		t.Fatalf("resumePoint = %d; want 7", got)
+	}
+	if got := a.resumePoint([16]byte{8}); got != 0 {
+		t.Fatalf("resumePoint of an unknown room = %d; want 0", got)
+	}
+}

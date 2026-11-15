@@ -1,15 +1,24 @@
 package client
 
-// Saving and restoring a device's pairwise sessions, so a restarted device
-// keeps decrypting what peers seal over the sessions it already held, and
-// keeps sending on them instead of starting new ones.
+// Saving and restoring a device's client state, so a restarted device
+// resumes where it left off: it keeps decrypting what peers seal over the
+// sessions and sender keys it already held, keeps sending on them instead
+// of starting new ones, and does not show a room's history again.
 //
-// What is saved: every active session and every receive-only fallback,
-// with the full ratchet state — chain keys, counters, the skipped message
-// keys still owed, and the decrypt cache that answers redeliveries.
-// What is not: per-room ordering state (a restarted device re-anchors on
-// its first delivery, as a fresh one does), messages stashed pending their
-// session's first message (resume redelivers them), and sender-key state.
+// What is saved (S-40, S-42):
+//   - every active pairwise session and every receive-only fallback, with
+//     the full ratchet state: chain keys, counters, the skipped message
+//     keys still owed, and the decrypt cache that answers redeliveries;
+//   - each room's ordering state: the last seq consumed and the message id
+//     at every seq (LastSeq gives the resume point), and whether this
+//     device was removed;
+//   - messages stashed until their session's first message, and group
+//     messages stashed until their sender key's distribution: their seqs
+//     are behind the saved position, so a resume would not bring them back;
+//   - sender keys: this device's own chain per room (signing key
+//     included), every installed peer chain with its skipped keys and
+//     decrypt cache, and each room's membership view (the devices a
+//     rotation redistributes to).
 //
 // Each peer-initiated session keeps the room seq its initiation arrived at,
 // which is how a replayed older initiation is told from a new one
@@ -20,24 +29,95 @@ package client
 // the identity key.
 //
 // Saving must happen before a sealed message is transmitted, not after:
-// a send chain step on the wire but not on disk would come back after a
-// restart and seal the next message under the same key and nonce. Send
-// therefore calls the BeforePublish hook after sealing each envelope and
-// before publishing it.
+// a chain step on the wire but not on disk would come back after a restart
+// and seal the next message under the same key and nonce. Every publish
+// (Send, SendGroup, Distribute, Rotate, and the rotation a removal
+// triggers) therefore calls the BeforePublish hook after sealing and
+// before publishing.
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
 )
 
-// sessionsVersion versions the snapshot format.
-const sessionsVersion = 1
+// stateVersion versions the snapshot format. Version 1 (S-40) held only
+// sessions and fallbacks; it still restores, with everything else empty.
+const stateVersion = 2
 
-type sessionsSnapshot struct {
+type stateSnapshot struct {
 	V         int               `json:"v"`
 	Sessions  []sessionSnapshot `json:"sessions"`
 	Fallbacks []sessionSnapshot `json:"fallbacks"` // in fallbackOrder
+
+	Rooms     []roomSnapshot      `json:"rooms,omitempty"`
+	Pending   []stashSnapshot     `json:"pending,omitempty"`    // pairwise, by (room, peer device)
+	SKOwn     []ownChainSnapshot  `json:"sk_own,omitempty"`     // this device's chain per room
+	SKPeers   []peerKeysSnapshot  `json:"sk_peers,omitempty"`   // installed chains per (room, sender device)
+	SKPending []stashSnapshot     `json:"sk_pending,omitempty"` // group, by (room, sender device)
+	RoomPeers []roomPeersSnapshot `json:"room_peers,omitempty"`
+}
+
+type roomSnapshot struct {
+	Room    [16]byte       `json:"room"`
+	Started bool           `json:"started"`
+	LastSeq int64          `json:"last_seq"`
+	Seen    []seenSnapshot `json:"seen"` // ids is rebuilt from it
+	Removed bool           `json:"removed,omitempty"`
+}
+
+type seenSnapshot struct {
+	Seq int64    `json:"seq"`
+	ID  [16]byte `json:"id"`
+}
+
+type stashSnapshot struct {
+	Room     [16]byte  `json:"room"`
+	Device   [16]byte  `json:"device"`
+	Delivers []deliver `json:"delivers"` // in arrival order
+}
+
+type ownChainSnapshot struct {
+	Room      [16]byte `json:"room"`
+	KeyID     uint32   `json:"key_id"`
+	Iteration uint32   `json:"iteration"`
+	ChainKey  [32]byte `json:"chain_key"`
+	Signing   []byte   `json:"signing"` // ed25519 private key
+}
+
+type peerKeysSnapshot struct {
+	Room   [16]byte          `json:"room"`
+	Device [16]byte          `json:"device"`
+	States []skStateSnapshot `json:"states"` // oldest first
+}
+
+type skStateSnapshot struct {
+	KeyID     uint32            `json:"key_id"`
+	DistIter  uint32            `json:"dist_iter"`
+	DistChain [32]byte          `json:"dist_chain"`
+	Iteration uint32            `json:"iteration"`
+	ChainKey  [32]byte          `json:"chain_key"`
+	Signing   []byte            `json:"signing"` // ed25519 public key
+	Skipped   []skSkipped       `json:"skipped"`
+	Cache     []skCacheSnapshot `json:"cache"` // in cacheOnce order
+}
+
+type skSkipped struct {
+	Iteration uint32     `json:"iteration"`
+	Key       MessageKey `json:"key"`
+}
+
+type skCacheSnapshot struct {
+	Iteration uint32   `json:"iteration"`
+	ADHash    [32]byte `json:"ad_hash"`
+	CTHash    [32]byte `json:"ct_hash"`
+	PT        []byte   `json:"pt"`
+}
+
+type roomPeersSnapshot struct {
+	Room  [16]byte `json:"room"`
+	Peers []Peer   `json:"peers"`
 }
 
 type sessionSnapshot struct {
@@ -82,22 +162,34 @@ type cacheSnapshot struct {
 	PT     []byte   `json:"pt"`
 }
 
-// SetBeforePublish installs f, which Send calls after sealing each
+// SetBeforePublish installs f, which every publish calls after sealing an
 // envelope and before publishing it — the point at which a caller that
-// saves sessions (MarshalSessions) must save. An error from f stops the
-// send before that envelope leaves. Nil removes the hook.
+// saves state (MarshalState) must save. An error from f stops the publish
+// before that envelope leaves. Nil removes the hook.
 func (c *Client) SetBeforePublish(f func() error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.beforePublish = f
 }
 
-// MarshalSessions returns a snapshot of the client's pairwise sessions for
-// RestoreSessions. It holds secret key material.
-func (c *Client) MarshalSessions() ([]byte, error) {
+// LastSeq returns the last seq this device consumed in room, the point to
+// resume from after a restart; ok is false for a room it has no record of.
+func (c *Client) LastSeq(room [16]byte) (seq int64, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	snap := sessionsSnapshot{V: sessionsVersion}
+	rs, ok := c.rooms[room]
+	if !ok || !rs.started {
+		return 0, false
+	}
+	return rs.lastSeq, true
+}
+
+// MarshalState returns a snapshot of the client's state for RestoreState.
+// It holds secret key material.
+func (c *Client) MarshalState() ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	snap := stateSnapshot{V: stateVersion}
 	for k, s := range c.sessions {
 		snap.Sessions = append(snap.Sessions, snapshotSession(k.room, s))
 	}
@@ -108,24 +200,52 @@ func (c *Client) MarshalSessions() ([]byte, error) {
 		}
 		snap.Fallbacks = append(snap.Fallbacks, snapshotSession(fk.room, s))
 	}
+	for room, rs := range c.rooms {
+		r := roomSnapshot{Room: room, Started: rs.started, LastSeq: rs.lastSeq, Removed: rs.removed}
+		for seq, id := range rs.seen {
+			r.Seen = append(r.Seen, seenSnapshot{Seq: seq, ID: id})
+		}
+		snap.Rooms = append(snap.Rooms, r)
+	}
+	for k, ds := range c.pending {
+		snap.Pending = append(snap.Pending, stashSnapshot{Room: k.room, Device: k.peer, Delivers: ds})
+	}
+	for room, ch := range c.skOwn {
+		snap.SKOwn = append(snap.SKOwn, ownChainSnapshot{
+			Room: room, KeyID: ch.KeyID, Iteration: ch.iteration, ChainKey: ch.chainKey, Signing: ch.signing,
+		})
+	}
+	for ref, keys := range c.skPeers {
+		p := peerKeysSnapshot{Room: ref.room, Device: ref.device}
+		for _, st := range keys.states {
+			p.States = append(p.States, snapshotSKState(st))
+		}
+		snap.SKPeers = append(snap.SKPeers, p)
+	}
+	for ref, ds := range c.skPending {
+		snap.SKPending = append(snap.SKPending, stashSnapshot{Room: ref.room, Device: ref.device, Delivers: ds})
+	}
+	for room, peers := range c.roomPeers {
+		snap.RoomPeers = append(snap.RoomPeers, roomPeersSnapshot{Room: room, Peers: peers})
+	}
 	return json.Marshal(snap)
 }
 
-// RestoreSessions replaces the client's pairwise sessions with a snapshot
-// from MarshalSessions. Call it before Dial. A snapshot that does not
-// parse, or has another version, changes nothing.
-func (c *Client) RestoreSessions(b []byte) error {
-	var snap sessionsSnapshot
+// RestoreState replaces the client's state with a snapshot from
+// MarshalState. Call it before Dial. A snapshot that does not parse, or
+// has an unknown version, changes nothing.
+func (c *Client) RestoreState(b []byte) error {
+	var snap stateSnapshot
 	if err := json.Unmarshal(b, &snap); err != nil {
-		return fmt.Errorf("restore sessions: %w", err)
+		return fmt.Errorf("restore state: %w", err)
 	}
-	if snap.V != sessionsVersion {
-		return fmt.Errorf("restore sessions: snapshot version %d, want %d", snap.V, sessionsVersion)
+	if snap.V != 1 && snap.V != stateVersion {
+		return fmt.Errorf("restore state: snapshot version %d, want 1 or %d", snap.V, stateVersion)
 	}
 	sessions := make(map[sessionKey]*session, len(snap.Sessions))
 	for _, ss := range snap.Sessions {
 		if ss.Peer.Device == ([16]byte{}) {
-			return errors.New("restore sessions: session without a peer device")
+			return errors.New("restore state: session without a peer device")
 		}
 		sessions[sessionKey{room: ss.Room, peer: ss.Peer.Device}] = restoreSession(ss)
 	}
@@ -136,12 +256,96 @@ func (c *Client) RestoreSessions(b []byte) error {
 		fallbacks[fk] = restoreSession(ss)
 		order = append(order, fk)
 	}
+	rooms := make(map[[16]byte]*roomState, len(snap.Rooms))
+	for _, r := range snap.Rooms {
+		rs := &roomState{
+			started: r.Started, lastSeq: r.LastSeq, removed: r.Removed,
+			seen: make(map[int64][16]byte, len(r.Seen)), ids: make(map[[16]byte]int64, len(r.Seen)),
+		}
+		for _, sn := range r.Seen {
+			rs.seen[sn.Seq] = sn.ID
+			rs.ids[sn.ID] = sn.Seq
+		}
+		rooms[r.Room] = rs
+	}
+	pending := make(map[sessionKey][]deliver, len(snap.Pending))
+	for _, p := range snap.Pending {
+		pending[sessionKey{room: p.Room, peer: p.Device}] = p.Delivers
+	}
+	skOwn := make(map[[16]byte]*SenderChain, len(snap.SKOwn))
+	for _, o := range snap.SKOwn {
+		if len(o.Signing) != ed25519.PrivateKeySize {
+			return fmt.Errorf("restore state: own sender key for room %s: bad signing key", format(o.Room))
+		}
+		skOwn[o.Room] = &SenderChain{KeyID: o.KeyID, iteration: o.Iteration, chainKey: o.ChainKey, signing: ed25519.PrivateKey(o.Signing)}
+	}
+	skPeers := make(map[skRef]*SenderKeys, len(snap.SKPeers))
+	for _, p := range snap.SKPeers {
+		keys := NewSenderKeys()
+		for _, st := range p.States {
+			if len(st.Signing) != ed25519.PublicKeySize {
+				return fmt.Errorf("restore state: sender key %d: bad signing key", st.KeyID)
+			}
+			keys.states = append(keys.states, restoreSKState(st))
+		}
+		skPeers[skRef{room: p.Room, device: p.Device}] = keys
+	}
+	skPending := make(map[skRef][]deliver, len(snap.SKPending))
+	for _, p := range snap.SKPending {
+		skPending[skRef{room: p.Room, device: p.Device}] = p.Delivers
+	}
+	roomPeers := make(map[[16]byte][]Peer, len(snap.RoomPeers))
+	for _, rp := range snap.RoomPeers {
+		roomPeers[rp.Room] = rp.Peers
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sessions = sessions
 	c.fallbacks = fallbacks
 	c.fallbackOrder = order
+	c.rooms = rooms
+	c.pending = pending
+	c.skOwn = skOwn
+	c.skPeers = skPeers
+	c.skPending = skPending
+	c.roomPeers = roomPeers
 	return nil
+}
+
+func snapshotSKState(st *skState) skStateSnapshot {
+	out := skStateSnapshot{
+		KeyID: st.keyID, DistIter: st.distIter, DistChain: st.distChain,
+		Iteration: st.iteration, ChainKey: st.chainKey, Signing: st.signing,
+	}
+	for it, mk := range st.skipped {
+		out.Skipped = append(out.Skipped, skSkipped{Iteration: it, Key: mk})
+	}
+	for _, it := range st.cacheOnce {
+		e, ok := st.cache[it]
+		if !ok {
+			continue
+		}
+		out.Cache = append(out.Cache, skCacheSnapshot{Iteration: it, ADHash: e.adHash, CTHash: e.ctHash, PT: e.pt})
+	}
+	return out
+}
+
+func restoreSKState(ss skStateSnapshot) *skState {
+	st := &skState{
+		keyID: ss.KeyID, distIter: ss.DistIter, distChain: ss.DistChain,
+		iteration: ss.Iteration, chainKey: ss.ChainKey,
+		signing: ed25519.PublicKey(append([]byte(nil), ss.Signing...)),
+		skipped: make(map[uint32]MessageKey, len(ss.Skipped)),
+		cache:   make(map[uint32]skCacheEntry, len(ss.Cache)),
+	}
+	for _, sk := range ss.Skipped {
+		st.skipped[sk.Iteration] = sk.Key
+	}
+	for _, ce := range ss.Cache {
+		st.cache[ce.Iteration] = skCacheEntry{adHash: ce.ADHash, ctHash: ce.CTHash, pt: ce.PT}
+		st.cacheOnce = append(st.cacheOnce, ce.Iteration)
+	}
+	return st
 }
 
 func snapshotSession(room [16]byte, s *session) sessionSnapshot {

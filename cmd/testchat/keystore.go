@@ -5,7 +5,7 @@ package main
 // (<user>-<device>.sessions.json). The same -user name is the same device
 // with the same keys and sessions on every run, so what peers seal over
 // those sessions decrypts after a restart — the reference client's
-// NewClientWithKeys and RestoreSessions are the "a device restoring its
+// NewClientWithKeys and RestoreState are the "a device restoring its
 // state" path this uses.
 
 import (
@@ -113,13 +113,15 @@ func writeFileAtomic(path string, data []byte) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// sessionsPath is where the device's ratchet sessions are saved, next to
-// its key file: <user>-<device>.sessions.json.
+// sessionsPath is where the device's client state (sessions, room
+// positions, stashes, sender keys) is saved, next to its key file:
+// <user>-<device>.sessions.json. The name predates S-42's wider snapshot;
+// the client still reads the older sessions-only format.
 func sessionsPath(keyPath string) string {
 	return strings.TrimSuffix(keyPath, ".json") + ".sessions.json"
 }
 
-// restoreSessions loads the saved sessions into c; none saved (a first
+// restoreSessions loads the saved client state into c; none saved (a first
 // run, or -fresh) is not an error.
 func restoreSessions(c *client.Client, keyPath string) error {
 	b, err := os.ReadFile(sessionsPath(keyPath)) //nolint:gosec // derived from the device identity, not user input
@@ -129,7 +131,7 @@ func restoreSessions(c *client.Client, keyPath string) error {
 	if err != nil {
 		return err
 	}
-	return c.RestoreSessions(b)
+	return c.RestoreState(b)
 }
 
 // saveState writes the device's state: the key file (with the one-time
@@ -150,7 +152,7 @@ func (a *app) saveState() error {
 	a.saveMu.Lock()
 	defer a.saveMu.Unlock()
 	syncKeysFromClient(a.keys, a.c)
-	b, err := a.c.MarshalSessions()
+	b, err := a.c.MarshalState()
 	if err != nil {
 		return fmt.Errorf("save sessions: %w", err)
 	}

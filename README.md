@@ -51,16 +51,19 @@ to UUIDs (see [Names](#names)).
   `/join standup`, `/send standup hello`. `/drop` simulates an outage,
   `/dial` reconnects, `/resume` replays, `/members` refreshes the member
   list, `/status` reports the session.
-  The device's keys and ratchet sessions persist in `~/.klacks-testchat`,
-  so the same `-user` is the same device with the same sessions on every
-  run: messages peers seal while the CLI is down, or sent over its
-  sessions before a restart, decrypt after it (`-fresh` starts over with
-  new keys and no sessions). After a `make nuke`, start each CLI device
-  with `-fresh`: room seqs restart at 1, and saved sessions remember the
-  seqs their peers' initiations arrived at, so they would refuse a peer's
-  new session as a replay of an old one. Sessions are saved before every publish and after every
-  delivery, so a crash can't make the CLI reuse a message key. `/send`
-  watches a room live; `/join` or `/resume` replay its history.
+  The device's keys and client state persist in `~/.klacks-testchat`:
+  ratchet sessions, each room's position, stashed messages and sender
+  keys. So the same `-user` is the same device on every run. Messages
+  peers seal while the CLI is down, or sent over its sessions before a
+  restart, decrypt after it, and `/join` resumes where the device left
+  off instead of showing the history again (`-fresh` starts over with new
+  keys and no state). After a `make nuke`, start each CLI device with
+  `-fresh`: room seqs restart at 1, and saved sessions remember the seqs
+  their peers' initiations arrived at, so they would refuse a peer's new
+  session as a replay of an old one. State is saved before every publish
+  and after every delivery, so a crash can't make the CLI reuse a message
+  key. `/send` watches a room live; `/join` and `/resume` replay what the
+  device has not read yet (`/resume <room> 0` replays it all).
 - **The dev UI** — a browser client with full E2EE (X3DH + Double Ratchet
   in WebCrypto plus its own ChaCha20-Poly1305), served by the dev server
   itself at `GET /devui` (same origin, because `/ws` rejects cross-origin
