@@ -62,7 +62,9 @@ to UUIDs (see [Names](#names)).
   their peers' initiations arrived at, so they would refuse a peer's new
   session as a replay of an old one. State is saved before every publish
   and after every delivery, so a crash can't make the CLI reuse a message
-  key. `/send` watches a room live; `/join` and `/resume` replay what the
+  key. Each room's record of the message ids it has seen (how replays and
+  tampering are caught) goes to an append-only `*.seen.jsonl` log beside
+  the state file, so a save writes only what is new. `/send` watches a room live; `/join` and `/resume` replay what the
   device has not read yet (`/resume <room> 0` replays it all).
 - **The dev UI** — a browser client with full E2EE (X3DH + Double Ratchet
   in WebCrypto plus its own ChaCha20-Poly1305), served by the dev server

@@ -393,6 +393,7 @@ func (c *Client) checkOrdering(room [16]byte, seq int64, mid [16]byte) (redelive
 		rs.lastSeq = seq
 		rs.seen[seq] = mid
 		rs.ids[mid] = seq
+		c.seenLog = append(c.seenLog, SeenEntry{Room: room, Seq: seq, ID: mid})
 		return false, nil
 	}
 	switch {
@@ -400,6 +401,7 @@ func (c *Client) checkOrdering(room [16]byte, seq int64, mid [16]byte) (redelive
 		rs.lastSeq = seq
 		rs.seen[seq] = mid
 		rs.ids[mid] = seq
+		c.seenLog = append(c.seenLog, SeenEntry{Room: room, Seq: seq, ID: mid})
 		return false, nil
 	case seq <= rs.lastSeq:
 		if id, ok := rs.seen[seq]; ok && id == mid {
