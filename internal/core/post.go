@@ -54,16 +54,14 @@ func (s *Service) PostMessage(ctx context.Context, room, sender store.UUID, p Pa
 	var seq int64
 	var committed store.Message
 	err := s.rooms.Locked(ctx, room, func(ctx context.Context, l *store.LockedRoom) error {
-		role, err := memberRole(ctx, l, sender)
+		// One round trip for both, after the lock (S-48). A non-member's
+		// role is empty, which authorize refuses.
+		role, _, ts, err := l.RoleAndWriteTS(ctx, sender)
 		if err != nil {
 			return err
 		}
-		if err := authorize(request{actor: role, action: actPost}); err != nil {
+		if err := authorize(request{actor: Role(role), action: actPost}); err != nil {
 			return fmt.Errorf("post message: %w", err)
-		}
-		ts, err := l.WriteTS(ctx)
-		if err != nil {
-			return err
 		}
 		seq = l.NextSeq()
 		committed = store.Message{
