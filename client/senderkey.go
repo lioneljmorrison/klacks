@@ -557,11 +557,15 @@ func (c *Client) decryptGroup(d deliver) ([]byte, error) {
 		// The key id's distribution has not landed yet: stash below.
 		c.mu.Lock()
 	}
+	if stashed(c.skPending[key], d) {
+		c.mu.Unlock()
+		return nil, errSenderKeyUnknown
+	}
 	if n := len(c.skPending[key]); n >= skPendingLimit {
 		c.mu.Unlock()
 		return nil, errTooManyPending
 	}
-	c.skPending[key] = append(c.skPending[key], d)
+	c.skPending[key] = stash(c.skPending[key], d)
 	c.mu.Unlock()
 	return nil, errSenderKeyUnknown
 }
