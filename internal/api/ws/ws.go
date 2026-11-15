@@ -68,6 +68,19 @@ type Manager struct {
 	ReplayWindow  time.Duration
 	ReplayEntries int
 
+	// PublishTimeout bounds each publish, from the frame to its reply (S-47):
+	// a partitioned store never answers, and the server-side lock and
+	// statement timeouts cannot fire without it. Size it to the room lock
+	// timeout plus the ScyllaDB write timeout. 0 means no deadline.
+	PublishTimeout time.Duration
+
+	// OriginPatterns are the cross-origin hosts allowed to upgrade
+	// (websocket.AcceptOptions.OriginPatterns, S-43). Empty keeps the
+	// same-origin check. Set it only with an authenticator whose credential
+	// is never ambient (JWT): with the dev stub, same-origin is the defense
+	// against cross-site WebSocket hijacking.
+	OriginPatterns []string
+
 	// Chat serves the client frames. It must be set before serving; while it
 	// is nil, every valid frame is answered with a "not implemented yet"
 	// error (unit tests, and the endpoint before S-13).
@@ -130,9 +143,8 @@ func (c *Conn) SessionID() store.UUID { return c.session }
 
 // ServeHTTP authenticates the request, upgrades it and serves the connection
 // until either side closes it. Authentication happens before the upgrade, so
-// a failure is a plain 401. Accept's default same-origin check stays on: with
-// credentials in the query string it is the defense against cross-site
-// WebSocket hijacking.
+// a failure is a plain 401. Accept's same-origin check stays on, widened only
+// by OriginPatterns (S-43).
 func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id, err := m.auth.Authenticate(r)
 	if err != nil {
@@ -151,7 +163,7 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "shutting down", http.StatusServiceUnavailable)
 		return
 	}
-	wsc, err := websocket.Accept(w, r, nil)
+	wsc, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: m.OriginPatterns})
 	if err != nil {
 		return // Accept has written the response
 	}
@@ -293,6 +305,13 @@ func (m *Manager) slowDisconnect(c *Conn) {
 // SlowDisconnects returns how many connections have been dropped for
 // backpressure (S-16).
 func (m *Manager) SlowDisconnects() int64 { return m.slowDisconnects.Load() }
+
+// Connections is the number of open client connections.
+func (m *Manager) Connections() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.conns)
+}
 
 // ping drops the connection when the peer stops answering pings.
 func (m *Manager) ping(ctx context.Context, c *Conn, log *slog.Logger) {

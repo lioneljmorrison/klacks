@@ -258,6 +258,7 @@ const (
 	CodeRoomNotFound       = "room_not_found"
 	CodeInvalidArgument    = "invalid_argument"
 	CodeRateLimited        = "rate_limited"
+	CodeUnavailable        = "unavailable"
 	CodeInternal           = "internal"
 )
 
@@ -279,9 +280,10 @@ var codes = []struct {
 
 // ErrorFor maps err to an error frame. A decode error keeps its full text,
 // which says what was wrong with the frame. A core error gets its sentinel's
-// text, without the wrapping context. Anything else becomes "internal" with
-// no detail, which belongs in the server log, not on the wire. The caller
-// sets RoomID and MessageID.
+// text, without the wrapping context. A store outage or timeout
+// (store.Unavailable) becomes "unavailable", which the client may retry
+// (S-46). Anything else becomes "internal" with no detail, which belongs in
+// the server log, not on the wire. The caller sets RoomID and MessageID.
 func ErrorFor(err error) *Error {
 	for _, c := range codes {
 		if errors.Is(err, c.err) {
@@ -291,6 +293,9 @@ func ErrorFor(err error) *Error {
 			}
 			return &Error{Code: c.code, Message: msg}
 		}
+	}
+	if store.Unavailable(err) {
+		return &Error{Code: CodeUnavailable, Message: "store unavailable; retry"}
 	}
 	return &Error{Code: CodeInternal, Message: "internal error"}
 }

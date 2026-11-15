@@ -34,7 +34,7 @@ func b64(n int) []byte {
 func testDevices(t *testing.T) (base string, devices *store.Devices) {
 	t.Helper()
 	pool := dbtest.MigratedPostgres(t)
-	devices = store.NewDevices(pool)
+	devices = store.NewDevices(pool, 0)
 	srv := NewServer(testHTTPConfig(), NewHealth(nil, time.Second, discard),
 		nil, NewDevices(auth.Dev{}, devices, discard), discard)
 	ts := httptest.NewServer(srv.srv.Handler)

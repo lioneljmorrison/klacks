@@ -19,8 +19,8 @@ type Identity struct {
 }
 
 // Authenticator identifies the client behind r. It returns an error wrapping
-// ErrUnauthenticated when r carries no valid identity. Real auth (S-31)
-// implements it with JWT/mTLS.
+// ErrUnauthenticated when r carries no valid identity. JWT is the real
+// implementation; Dev is the stub for env dev.
 type Authenticator interface {
 	Authenticate(r *http.Request) (Identity, error)
 }

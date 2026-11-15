@@ -431,8 +431,10 @@ export function decodeHeader(b) {
     if (b.length < at + 32) throw fail("truncated");
     return b.slice(at, at + 32);
   };
+  // The trailer ends the header: only the exact encoded length parses, as
+  // in the Go reference (S-35).
   const copyTrailer = (at) => {
-    if (b.length < at + 32) throw fail("truncated");
+    if (b.length !== at + 32) throw fail("wrong length");
     h.recipient = b.slice(at, at + 16);
     h.device = b.slice(at + 16, at + 32);
   };

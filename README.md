@@ -51,16 +51,21 @@ to UUIDs (see [Names](#names)).
   `/join standup`, `/send standup hello`. `/drop` simulates an outage,
   `/dial` reconnects, `/resume` replays, `/members` refreshes the member
   list, `/status` reports the session.
-  The device's keys and ratchet sessions persist in `~/.klacks-testchat`,
-  so the same `-user` is the same device with the same sessions on every
-  run: messages peers seal while the CLI is down, or sent over its
-  sessions before a restart, decrypt after it (`-fresh` starts over with
-  new keys and no sessions). After a `make nuke`, start each CLI device
-  with `-fresh`: room seqs restart at 1, and saved sessions remember the
-  seqs their peers' initiations arrived at, so they would refuse a peer's
-  new session as a replay of an old one. Sessions are saved before every publish and after every
-  delivery, so a crash can't make the CLI reuse a message key. `/send`
-  watches a room live; `/join` or `/resume` replay its history.
+  The device's keys and client state persist in `~/.klacks-testchat`:
+  ratchet sessions, each room's position, stashed messages and sender
+  keys. So the same `-user` is the same device on every run. Messages
+  peers seal while the CLI is down, or sent over its sessions before a
+  restart, decrypt after it, and `/join` resumes where the device left
+  off instead of showing the history again (`-fresh` starts over with new
+  keys and no state). After a `make nuke`, start each CLI device with
+  `-fresh`: room seqs restart at 1, and saved sessions remember the seqs
+  their peers' initiations arrived at, so they would refuse a peer's new
+  session as a replay of an old one. State is saved before every publish
+  and after every delivery, so a crash can't make the CLI reuse a message
+  key. Each room's record of the message ids it has seen (how replays and
+  tampering are caught) goes to an append-only `*.seen.jsonl` log beside
+  the state file, so a save writes only what is new. `/send` watches a room live; `/join` and `/resume` replay what the
+  device has not read yet (`/resume <room> 0` replays it all).
 - **The dev UI** — a browser client with full E2EE (X3DH + Double Ratchet
   in WebCrypto plus its own ChaCha20-Poly1305), served by the dev server
   itself at `GET /devui` (same origin, because `/ws` rejects cross-origin
@@ -141,7 +146,10 @@ licensing note on libsignal.
 ## Layout
 
 See [docs/architecture.md](docs/architecture.md) for a diagram of how the
-packages, transports and stores connect.
+packages, transports and stores connect, and
+[docs/operations.md](docs/operations.md) for running it: health and
+metrics, backup and restore of both stores (including `klacks reconcile`
+after a PostgreSQL restore), and failure modes.
 
 ```
 cmd/klacks           the server binary (serve, migrate, config)
@@ -167,3 +175,18 @@ pkg/chat             the public, importable ChatService
   503 otherwise. On shutdown it reports `draining` for `KLACKS_HTTP_DRAIN_DELAY`
   (default 0) before the listener closes, so load balancers can stop routing
   traffic. In-flight requests then get `KLACKS_HTTP_SHUTDOWN_TIMEOUT` to finish.
+
+## License
+
+klacks is licensed under the [Apache License 2.0](LICENSE). That is a
+permissive license, so you can embed `pkg/chat` in closed-source projects;
+it also includes an explicit patent grant. All direct dependencies are
+under compatible permissive licenses (Apache-2.0, MIT, BSD, ISC). Client
+apps that use libsignal take on its AGPL-3.0 license; see
+[docs/protocol.md](docs/protocol.md).
+
+If you run klacks as a service for other people, start from the privacy
+policy and terms of service templates in [docs/legal](docs/legal/). They
+describe what a klacks server stores (ciphertext and routing metadata,
+never message content). They are templates, not legal advice: have them
+reviewed before you publish them.

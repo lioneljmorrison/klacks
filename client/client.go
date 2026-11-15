@@ -63,6 +63,10 @@ type Client struct {
 	// The view is what rotation redistributes to.
 	roomPeers map[[16]byte][]Peer
 
+	// seenLog holds the seen entries recorded since the caller last
+	// acknowledged them (MarshalStateIncremental, SeenPersisted; S-49).
+	seenLog []SeenEntry
+
 	// beforePublish, when set, runs after Send seals each envelope and
 	// before it is published (SetBeforePublish).
 	beforePublish func() error
