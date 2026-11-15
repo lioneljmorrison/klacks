@@ -66,6 +66,11 @@ to UUIDs (see [Names](#names)).
   tampering are caught) goes to an append-only `*.seen.jsonl` log beside
   the state file, so a save writes only what is new. `/send` watches a room live; `/join` and `/resume` replay what the
   device has not read yet (`/resume <room> 0` replays it all).
+  Against a server with JWT auth (`auth.jwt`), pass `-token <jwt>` (or set
+  `KLACKS_TOKEN`) with `-user` and `-device` naming the token's `sub` and
+  `device_id`. Messaging works; the room commands don't, because the dev
+  room API exists only with the dev stub. In Go, `Client.SetTokenSource`
+  does the same for the reference client.
 - **The dev UI** — a browser client with full E2EE (X3DH + Double Ratchet
   in WebCrypto plus its own ChaCha20-Poly1305), served by the dev server
   itself at `GET /devui` (same origin, because `/ws` rejects cross-origin
@@ -137,6 +142,14 @@ make up migrate-up
 go run ./examples/meetings
 ```
 
+From another process or language, the same API is served over gRPC
+(`api/proto/klacks/chat/v1/chat.proto`) when `KLACKS_GRPC_ADDR` is set.
+Each call carries `authorization: Bearer <token>` with one of
+`KLACKS_GRPC_SERVICE_TOKENS` and acts as `KLACKS_GRPC_ACTOR`; set
+`KLACKS_GRPC_TLS_CERT_FILE`/`_KEY_FILE` unless a TLS proxy fronts it (see
+`.env.example`). gRPC and `/ws` share one core, so they see each other's
+messages live.
+
 Encryption happens entirely in client apps: the server never sees plaintext
 and treats all crypto as opaque bytes, so any client library that speaks the
 wire format interoperates. See [docs/protocol.md](docs/protocol.md)
@@ -158,9 +171,9 @@ api/proto            protobuf definitions; api/gen holds generated code
 examples/meetings    the toy meeting scheduler, an embedding example
 internal/config      configuration loading and validation
 internal/logging     slog setup (text in dev, JSON in prod)
-internal/api         transports (HTTP now; WebSocket and gRPC later)
+internal/api         transports (HTTP, WebSocket, gRPC)
 internal/api/devui   the browser test client, served at /devui in dev
-internal/api/grpcapi the gRPC adapter over pkg/chat (not served yet)
+internal/api/grpcapi the gRPC adapter over pkg/chat (served when grpc.addr is set)
 internal/core        rooms, sequencing, fan-out, resume
 internal/names       human name → UUID mapping (test clients)
 internal/store       PostgreSQL + ScyllaDB access, migrations
