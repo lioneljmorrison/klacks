@@ -7,6 +7,7 @@
 # Needs the stack up (`make up`) and KLACKS_POSTGRES_DSN / KLACKS_SCYLLA_HOSTS
 # (the Makefile exports them from .env). Every knob below can be overridden
 # from the environment, e.g. PERF_ROOMS=100 PERF_RATE=100 for a scaled run.
+# Arguments are passed on to klacksload (e.g. -json runs.jsonl -label k=v).
 #
 # Kept to bash 3.2 and BSD tools so it runs on macOS as well as Linux.
 set -euo pipefail
@@ -79,7 +80,7 @@ until curl -fs -o /dev/null "$base/readyz"; do
 done
 
 {
-	echo "perf: $(uname -srm), $(date -u +%Y-%m-%dT%H:%M:%SZ), commit $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+	echo "perf: $(uname -srm), $(date -u +%Y-%m-%dT%H:%M:%SZ), commit ${PERF_COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 	echo "perf: rooms=$PERF_ROOMS members=$PERF_MEMBERS rate=$PERF_RATE duration=$PERF_DURATION warmup=$PERF_WARMUP pool=$PERF_POOL max-p99=$PERF_MAX_P99"
 } | tee "$report"
 
@@ -87,7 +88,7 @@ status=0
 "$KLACKSLOAD" -base "$base" -metrics "$metrics" \
 	-rooms "$PERF_ROOMS" -members "$PERF_MEMBERS" -rate "$PERF_RATE" \
 	-duration "$PERF_DURATION" -warmup "$PERF_WARMUP" -max-p99 "$PERF_MAX_P99" \
-	2>&1 | tee -a "$report" || status=$?
+	${1+"$@"} 2>&1 | tee -a "$report" || status=$?
 
 if [ "$status" -ne 0 ]; then
 	echo "perf: FAILED (report: $report, server log: $log)" >&2

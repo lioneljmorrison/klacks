@@ -204,7 +204,12 @@ duplicate (plan §3.3c, known limitation).
   peak publishes/s × p99 lock hold, with headroom; the pgx default
   (max(4, CPUs)) saturated at 1k publishes/s and pushed delivery p99 to
   719 ms, while 60 gave 52 ms. Keep the sum over all klacks nodes under
-  PostgreSQL's `max_connections`.
+  PostgreSQL's `max_connections`. Measured capacities per machine, and what
+  pool size, `synchronous_commit` and S-48 change, are in the
+  [performance case study](performance-case-study.md). A bigger pool doesn't
+  help when the commit flush is the bottleneck, and with
+  `synchronous_commit=off` a PostgreSQL crash needs `klacks reconcile`
+  like a restore.
 - **Room lock timeout** (10 s, `roomLockTimeout`) must exceed
   `KLACKS_SCYLLA_TIMEOUT`, since a publish holds the lock across its
   ScyllaDB write.
