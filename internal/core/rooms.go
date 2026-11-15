@@ -52,6 +52,13 @@ type Service struct {
 	messages  store.MessageStore
 	onPosted  func(context.Context, store.Message)
 	onRemoved func(context.Context, MemberRemoved)
+
+	// AllowRoomPost, if not nil, is the per-room publish limit (S-32): it
+	// is asked once per authorized publish, after the sender's membership
+	// check, so a non-member's refused publishes never spend a room's
+	// budget. False fails the publish with ErrRateLimited. It runs under
+	// the room lock and must be fast. Set it before serving.
+	AllowRoomPost func(room store.UUID) bool
 }
 
 // New returns a Service. onPosted, if not nil, is called with each committed

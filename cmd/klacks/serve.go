@@ -23,6 +23,7 @@ import (
 	"github.com/lioneljmorrison/klacks/internal/auth"
 	"github.com/lioneljmorrison/klacks/internal/config"
 	"github.com/lioneljmorrison/klacks/internal/core"
+	"github.com/lioneljmorrison/klacks/internal/ratelimit"
 	"github.com/lioneljmorrison/klacks/internal/store"
 	"github.com/lioneljmorrison/klacks/pkg/chat"
 )
@@ -180,6 +181,7 @@ func newServers(cfg config.Config, pg *pgxpool.Pool, scylla *gocql.Session, log 
 		// The prekey API's store calls share the room calls' deadline
 		// (S-51), so a partitioned PostgreSQL answers 503, not a hang.
 		devices = httpapi.NewDevices(a, store.NewDevices(pg, roomLockTimeout), log)
+		applyRateLimits(cfg.RateLimit, svc, s.mgr)
 		s.mgr.Chat = svc
 		s.mgr.PublishTimeout = publishTimeout(cfg)
 		wsHandler = s.mgr
@@ -403,4 +405,15 @@ func serveMetrics(ctx context.Context, addr string, h http.Handler, log *slog.Lo
 		defer cancel()
 		_ = srv.Shutdown(ctx)
 	}, nil
+}
+
+// applyRateLimits installs the configured limits (S-32): per user on publish
+// frames and connection attempts at the WebSocket, per room in the core
+// after the sender's membership check. An off limit installs nothing.
+func applyRateLimits(rl config.RateLimit, svc *core.Service, mgr *ws.Manager) {
+	mgr.PublishPerUser = ratelimit.New(rl.PublishUser)
+	mgr.ConnectPerUser = ratelimit.New(rl.ConnectUser)
+	if room := ratelimit.New(rl.PublishRoom); room != nil {
+		svc.AllowRoomPost = func(id store.UUID) bool { return room.Allow(id) }
+	}
 }

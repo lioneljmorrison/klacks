@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lioneljmorrison/klacks/internal/api/ws"
 	"github.com/lioneljmorrison/klacks/internal/auth"
 	"github.com/lioneljmorrison/klacks/internal/config"
+	"github.com/lioneljmorrison/klacks/internal/core"
 )
 
 func jwtConfig(t *testing.T, env string) config.Config {
@@ -93,5 +95,19 @@ func TestPublishTimeout(t *testing.T) {
 	cfg.Scylla.Timeout = config.Duration(5 * time.Second)
 	if got, want := publishTimeout(cfg), roomLockTimeout+5*time.Second; got != want {
 		t.Errorf("publishTimeout = %v; want %v", got, want)
+	}
+}
+
+func TestApplyRateLimits(t *testing.T) {
+	on := config.Default().RateLimit
+	svc, mgr := core.New(nil, nil, nil, nil), ws.NewManager(auth.Dev{}, nil)
+	applyRateLimits(on, svc, mgr)
+	if mgr.PublishPerUser == nil || mgr.ConnectPerUser == nil || svc.AllowRoomPost == nil {
+		t.Errorf("default limits not installed")
+	}
+	svc, mgr = core.New(nil, nil, nil, nil), ws.NewManager(auth.Dev{}, nil)
+	applyRateLimits(config.RateLimit{}, svc, mgr)
+	if mgr.PublishPerUser != nil || mgr.ConnectPerUser != nil || svc.AllowRoomPost != nil {
+		t.Errorf("off limits installed something")
 	}
 }

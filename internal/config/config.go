@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/lioneljmorrison/klacks/internal/ratelimit"
 )
 
 // Environment names.
@@ -35,6 +37,21 @@ type Config struct {
 	Metrics  Metrics  `json:"metrics"`
 	Auth     Auth     `json:"auth"`
 	GRPC     GRPC     `json:"grpc"`
+	// RateLimit holds the per-user and per-room limits (S-32).
+	RateLimit RateLimit `json:"rate_limit"`
+}
+
+// RateLimit configures the in-memory token buckets. A limit of rate 0 and
+// burst 0 is off.
+//
+// One typed message costs one publish per recipient device (pairwise
+// encryption), and a sender-key rotation after a removal costs every
+// remaining member one publish per other member device, so bursts are sized
+// for a whole group's fan-out, not for single messages.
+type RateLimit struct {
+	PublishUser ratelimit.Limit `json:"publish_user"` // publish frames per user
+	PublishRoom ratelimit.Limit `json:"publish_room"` // authorized publishes per room
+	ConnectUser ratelimit.Limit `json:"connect_user"` // /ws connection attempts per user
 }
 
 // GRPC configures the gRPC API listener (S-45): klacks.chat.v1.ChatService
@@ -166,6 +183,11 @@ func Default() Config {
 			ReplicationFactor: 1,
 			Timeout:           Duration(5 * time.Second),
 		},
+		RateLimit: RateLimit{
+			PublishUser: ratelimit.Limit{Rate: 20, Burst: 200},
+			PublishRoom: ratelimit.Limit{Rate: 200, Burst: 2000},
+			ConnectUser: ratelimit.Limit{Rate: 1, Burst: 10},
+		},
 	}
 }
 
@@ -240,6 +262,25 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 		cfg.Scylla.ReplicationFactor = n
 	}
 	dur("KLACKS_SCYLLA_TIMEOUT", &cfg.Scylla.Timeout)
+	limit := func(prefix string, dst *ratelimit.Limit) {
+		if v := getenv(prefix + "_RATE"); v != "" {
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s_RATE: %w", prefix, err))
+			}
+			dst.Rate = f
+		}
+		if v := getenv(prefix + "_BURST"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s_BURST: %w", prefix, err))
+			}
+			dst.Burst = n
+		}
+	}
+	limit("KLACKS_RATELIMIT_PUBLISH_USER", &cfg.RateLimit.PublishUser)
+	limit("KLACKS_RATELIMIT_PUBLISH_ROOM", &cfg.RateLimit.PublishRoom)
+	limit("KLACKS_RATELIMIT_CONNECT_USER", &cfg.RateLimit.ConnectUser)
 	str("KLACKS_AUTH_JWT_PUBLIC_KEY_FILE", &cfg.Auth.JWT.PublicKeyFile)
 	str("KLACKS_AUTH_JWT_ISSUER", &cfg.Auth.JWT.Issuer)
 	str("KLACKS_AUTH_JWT_AUDIENCE", &cfg.Auth.JWT.Audience)
@@ -327,6 +368,15 @@ func (c Config) Validate() error {
 	}
 	if c.Scylla.ReplicationFactor < 1 {
 		bad("scylla.replication_factor must be at least 1")
+	}
+	for name, l := range map[string]ratelimit.Limit{
+		"rate_limit.publish_user": c.RateLimit.PublishUser,
+		"rate_limit.publish_room": c.RateLimit.PublishRoom,
+		"rate_limit.connect_user": c.RateLimit.ConnectUser,
+	} {
+		if err := l.Validate(); err != nil {
+			bad("%s: %v", name, err)
+		}
 	}
 	if c.Auth.JWT.Enabled() {
 		if c.Auth.JWT.Issuer == "" {
