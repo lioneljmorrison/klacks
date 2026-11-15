@@ -367,6 +367,9 @@ machines.
   milliseconds to seconds within one step. Alert on pool saturation and
   rising `klacks_room_lock_held_seconds` before users see delays.
 
+For small machines and cheap cloud servers, including a provisional
+minimum spec and a cloud test plan, see [small-hardware.md](small-hardware.md).
+
 ## Limitations
 
 - **Everything shares one machine.** The generator's 10,000 connections and
