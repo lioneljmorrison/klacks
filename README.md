@@ -66,6 +66,11 @@ to UUIDs (see [Names](#names)).
   tampering are caught) goes to an append-only `*.seen.jsonl` log beside
   the state file, so a save writes only what is new. `/send` watches a room live; `/join` and `/resume` replay what the
   device has not read yet (`/resume <room> 0` replays it all).
+  Against a server with JWT auth (`auth.jwt`), pass `-token <jwt>` (or set
+  `KLACKS_TOKEN`) with `-user` and `-device` naming the token's `sub` and
+  `device_id`. Messaging works; the room commands don't, because the dev
+  room API exists only with the dev stub. In Go, `Client.SetTokenSource`
+  does the same for the reference client.
 - **The dev UI** — a browser client with full E2EE (X3DH + Double Ratchet
   in WebCrypto plus its own ChaCha20-Poly1305), served by the dev server
   itself at `GET /devui` (same origin, because `/ws` rejects cross-origin
