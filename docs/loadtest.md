@@ -135,7 +135,8 @@ Measured on the same host, all numbers p50:
 ## Case study (S-54)
 
 Rate sweeps and tuning on M4, WSL and lab-hermes (150 runs): see
-[performance-case-study.md](performance-case-study.md).
+[performance-case-study.md](performance-case-study.md). Small machines and
+cheap cloud servers: [small-hardware.md](small-hardware.md).
 
 ## Performance gate (S-53)
 
