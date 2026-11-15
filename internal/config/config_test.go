@@ -161,3 +161,99 @@ func TestMetricsAddr(t *testing.T) {
 		t.Errorf("bad addr: err = %v", err)
 	}
 }
+
+func TestAuthJWTFromEnv(t *testing.T) {
+	m := map[string]string{
+		"KLACKS_AUTH_JWT_PUBLIC_KEY_FILE": "/etc/klacks/jwt.pub",
+		"KLACKS_AUTH_JWT_ISSUER":          "https://id.example",
+		"KLACKS_AUTH_JWT_AUDIENCE":        "klacks",
+	}
+	for k, v := range required {
+		m[k] = v
+	}
+	cfg, err := Load("", env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := JWT{PublicKeyFile: "/etc/klacks/jwt.pub", Issuer: "https://id.example", Audience: "klacks"}
+	if cfg.Auth.JWT != want {
+		t.Errorf("auth.jwt = %+v; want %+v", cfg.Auth.JWT, want)
+	}
+	if !cfg.Auth.JWT.Enabled() {
+		t.Error("Enabled() = false")
+	}
+	if (JWT{}).Enabled() {
+		t.Error("zero JWT Enabled() = true")
+	}
+}
+
+func TestAuthJWTNeedsIssuerAndAudience(t *testing.T) {
+	cfg := Default()
+	cfg.Postgres.DSN = "x"
+	cfg.Scylla.Hosts = []string{"a"}
+	cfg.Log.Format = "text"
+	cfg.Auth.JWT.PublicKeyFile = "/k"
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range []string{"auth.jwt.issuer", "auth.jwt.audience"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %s", err, want)
+		}
+	}
+}
+
+// S-43: browser apps served from another origin than klacks need their
+// origins allowed for /ws; only meaningful with JWT auth.
+func TestAuthAllowedOriginsFromEnv(t *testing.T) {
+	m := map[string]string{
+		"KLACKS_AUTH_JWT_PUBLIC_KEY_FILE": "/etc/klacks/jwt.pub",
+		"KLACKS_AUTH_JWT_ISSUER":          "https://id.example",
+		"KLACKS_AUTH_JWT_AUDIENCE":        "klacks",
+		"KLACKS_AUTH_ALLOWED_ORIGINS":     "app.example.com, https://*.example.org",
+	}
+	for k, v := range required {
+		m[k] = v
+	}
+	cfg, err := Load("", env(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"app.example.com", "https://*.example.org"}
+	if strings.Join(cfg.Auth.AllowedOrigins, "|") != strings.Join(want, "|") {
+		t.Errorf("auth.allowed_origins = %q; want %q", cfg.Auth.AllowedOrigins, want)
+	}
+	r := cfg.Redacted()
+	r.Auth.AllowedOrigins[0] = "changed"
+	if cfg.Auth.AllowedOrigins[0] != "app.example.com" {
+		t.Error("Redacted aliases auth.allowed_origins")
+	}
+}
+
+func TestAuthAllowedOriginsRejected(t *testing.T) {
+	base := func() Config {
+		cfg := Default()
+		cfg.Postgres.DSN = "x"
+		cfg.Scylla.Hosts = []string{"a"}
+		cfg.Log.Format = "text"
+		return cfg
+	}
+	// Without JWT the dev stub's identity rides in the query string, so
+	// same-origin must stay: allowed origins there would be silently ignored.
+	cfg := base()
+	cfg.Auth.AllowedOrigins = []string{"app.example.com"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "auth.allowed_origins") {
+		t.Errorf("without jwt: err = %v; want auth.allowed_origins error", err)
+	}
+	cfg = base()
+	cfg.Auth.JWT = JWT{PublicKeyFile: "/k", Issuer: "i", Audience: "a"}
+	cfg.Auth.AllowedOrigins = []string{"[bad"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "auth.allowed_origins") {
+		t.Errorf("bad pattern: err = %v; want auth.allowed_origins error", err)
+	}
+	cfg.Auth.AllowedOrigins = []string{"app.example.com", "https://*.example.org"}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("good patterns: %v", err)
+	}
+}

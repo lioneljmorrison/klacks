@@ -75,7 +75,10 @@ type Config struct {
 	// idle_in_transaction_session_timeout. It must be longer than
 	// ScyllaTimeout (a publish holds the lock across its ScyllaDB write);
 	// Open fails otherwise. 0 disables all three timeouts, which releases a
-	// lock only when its transaction ends — use knowingly.
+	// lock only when its transaction ends — use knowingly. It is also the
+	// client-side deadline of each device/prekey call and each room call
+	// that takes no lock, so a partitioned PostgreSQL fails them instead of
+	// hanging them; 0 disables that too.
 	RoomLockTimeout time.Duration
 
 	// Actor is the embedder's service identity (see the package comment):
@@ -164,7 +167,7 @@ func Open(ctx context.Context, cfg Config) (*Service, error) {
 		cfg:     cfg,
 		log:     log,
 		pool:    pool,
-		devices: store.NewDevices(pool),
+		devices: store.NewDevices(pool, cfg.RoomLockTimeout),
 		hub:     make(map[[16]byte]map[*subscription]struct{}),
 	}
 	var onRemoved func(context.Context, core.MemberRemoved)
@@ -270,6 +273,36 @@ func (s *Service) PostMessage(ctx context.Context, room RoomID, sender UserID, p
 		return 0, fmt.Errorf("post message: %w", err)
 	}
 	return Seq(seq), nil
+}
+
+// MaxAuditPage is the most events one AuditLog call returns.
+const MaxAuditPage = 1000
+
+// AuditLog returns up to limit (1..MaxAuditPage) of room's membership
+// changes with an ID above after, oldest first (S-33). Pass 0 to start, then
+// the last event's ID for the next page. Every create, add and remove that
+// committed is there, whichever API made it; nothing else is.
+func (s *Service) AuditLog(ctx context.Context, room RoomID, after int64, limit int) ([]AuditEvent, error) {
+	if limit < 1 || limit > MaxAuditPage {
+		return nil, fmt.Errorf("audit log: limit %d not in 1..%d: %w", limit, MaxAuditPage, ErrInvalidArgument)
+	}
+	events, err := s.core.Audit(ctx, store.UUID(room), after, limit)
+	if err != nil {
+		return nil, fmt.Errorf("audit log: %w", err)
+	}
+	out := make([]AuditEvent, len(events))
+	for i, e := range events {
+		out[i] = AuditEvent{
+			ID:     e.ID,
+			Room:   RoomID(e.Room),
+			Action: AuditAction(e.Action),
+			Actor:  UserID(e.Actor),
+			Target: UserID(e.Target),
+			Role:   Role(e.Role),
+			At:     e.At,
+		}
+	}
+	return out, nil
 }
 
 // Close stops every subscription (their channels close), waits for the

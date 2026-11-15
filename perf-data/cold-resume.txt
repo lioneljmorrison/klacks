@@ -1,0 +1,6 @@
+# Cold resume (S-54, 2026-11-14): load history at a sustainable rate with
+# `scripts/perf.sh -run-id R`, then `scripts/perf.sh -run-id R -phase resume`
+# (a fresh server: empty replay buffer, so every read is a ScyllaDB range read).
+wsl        load 1000/s 30s+10s: 1000 rooms, 1000 with history, 40001 messages replayed in 20.213s (includes 2s quiet wait per room); klacks_scylla_range_seconds n=1000 p50<=2ms p99<=32ms
+m4         load 1000/s 30s+10s: 1000 rooms, 1000 with history, 40001 messages replayed in 20.564s (includes 2s quiet wait per room); klacks_scylla_range_seconds n=1000 p50<=8ms p99<=16ms
+lab-hermes load  300/s 30s+10s: 1000 rooms, 1000 with history, 12001 messages replayed in 20.857s (includes 2s quiet wait per room); klacks_scylla_range_seconds n=1000 p50<=4ms p99<=32ms

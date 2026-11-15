@@ -174,11 +174,11 @@ server by pausing each store's container (S-37); a paused container is a
 network blackhole, the harsher case. The refused-connection row is the
 expected behavior, not drilled.
 
-| Store down | Publish | Resume / subscribe | `/readyz` |
-|---|---|---|---|
-| ScyllaDB | Fails with an error frame (code `internal` today, S-46); the transaction rolls back, `next_seq` does not move, nothing is delivered. | Error frame. | `503`, `scylla: unavailable` |
-| PostgreSQL refusing connections | Fails with an error frame; nothing committed. | Error frame. | `503`, `postgres: unavailable` |
-| PostgreSQL partitioned (no answer) | **Hangs** until the client disconnects; nothing commits (S-47 adds a deadline). | May hang likewise. | `503` within `KLACKS_HTTP_READY_TIMEOUT` |
+| Store down | Publish | Resume / subscribe | Prekey REST API | `/readyz` |
+|---|---|---|---|---|
+| ScyllaDB | Fails with an error frame, code `unavailable` (S-46); the transaction rolls back, `next_seq` does not move, nothing is delivered. | Error frame. | Unaffected (PostgreSQL only). | `503`, `scylla: unavailable` |
+| PostgreSQL refusing connections | Fails with an error frame, code `unavailable`; nothing committed. | Error frame, `unavailable`. | `503`, code `unavailable`. | `503`, `postgres: unavailable` |
+| PostgreSQL partitioned (no answer) | Fails with an error frame, code `unavailable`, after at most the room lock timeout plus `KLACKS_SCYLLA_TIMEOUT` (15 s by default, S-47); nothing commits unless the deadline hit during `COMMIT`. | Error frame, `unavailable`, after at most the room lock timeout (10 s) per store call. | `503`, code `unavailable`, after at most the room lock timeout (10 s, S-51). | `503` within `KLACKS_HTTP_READY_TIMEOUT` |
 
 Recovery is automatic: once the store answers, `/readyz` returns `200` and
 clients that resume from their last seq get exactly what they missed. No
@@ -204,7 +204,12 @@ duplicate (plan §3.3c, known limitation).
   peak publishes/s × p99 lock hold, with headroom; the pgx default
   (max(4, CPUs)) saturated at 1k publishes/s and pushed delivery p99 to
   719 ms, while 60 gave 52 ms. Keep the sum over all klacks nodes under
-  PostgreSQL's `max_connections`.
+  PostgreSQL's `max_connections`. Measured capacities per machine, and what
+  pool size, `synchronous_commit` and S-48 change, are in the
+  [performance case study](performance-case-study.md). A bigger pool doesn't
+  help when the commit flush is the bottleneck, and with
+  `synchronous_commit=off` a PostgreSQL crash needs `klacks reconcile`
+  like a restore.
 - **Room lock timeout** (10 s, `roomLockTimeout`) must exceed
   `KLACKS_SCYLLA_TIMEOUT`, since a publish holds the lock across its
   ScyllaDB write.

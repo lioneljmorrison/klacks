@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/lioneljmorrison/klacks/internal/api/devui"
@@ -69,29 +70,42 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 			},
 		)
 	}
-	dev := clientAuthenticator(cfg.Env) != nil
-	if a := clientAuthenticator(cfg.Env); a != nil {
+	a, err := clientAuthenticator(cfg)
+	if err != nil {
+		return err
+	}
+	dev := devTools(a)
+	if a != nil {
 		rooms := store.NewRooms(pg, roomLockTimeout)
 		var messages store.MessageStore = store.NewScyllaMessages(scylla)
 		if met != nil {
 			rooms.OnLockHeld = met.lockHeld
 			messages = met.timed(messages)
 		}
-		devices = httpapi.NewDevices(a, store.NewDevices(pg), log)
+		// The prekey API's store calls share the room calls' deadline
+		// (S-51), so a partitioned PostgreSQL answers 503, not a hang.
+		devices = httpapi.NewDevices(a, store.NewDevices(pg, roomLockTimeout), log)
 		mgr = ws.NewManager(a, log)
 		// Fan-out goes through the manager: after each commit the core
 		// hands the message to the hub (S-13).
 		svc := core.New(rooms, messages, mgr.Deliver, mgr.MemberRemoved)
 		mgr.Chat = svc
+		mgr.PublishTimeout = publishTimeout(cfg)
 		wsHandler = mgr
 		// The dev room endpoints shim core's room management over REST,
 		// so the browser test client can create and populate rooms.
 		if dev {
 			devRooms = httpapi.NewDevRooms(a, roomAdmin{svc: svc}, log)
+			log.Warn("client auth is the dev stub: any claimed identity is trusted")
+		} else {
+			// Config validation allows origins only with JWT (S-43).
+			mgr.OriginPatterns = cfg.Auth.AllowedOrigins
+			devices.AllowedOrigins = cfg.Auth.AllowedOrigins // S-50
+			log.Info("client auth is JWT", "issuer", cfg.Auth.JWT.Issuer, "audience", cfg.Auth.JWT.Audience,
+				"allowed_origins", cfg.Auth.AllowedOrigins)
 		}
-		log.Warn("client auth is the dev stub: any claimed identity is trusted")
 	} else {
-		log.Warn("no client authenticator for this env; /ws and the prekey bundle API are not served", "env", cfg.Env)
+		log.Warn("no client authenticator for this env (set auth.jwt); /ws and the prekey bundle API are not served", "env", cfg.Env)
 	}
 
 	handler := http.Handler(nil)
@@ -144,6 +158,12 @@ func cmdServe(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	return nil
 }
 
+// publishTimeout bounds a WebSocket publish end to end (S-47): it may wait
+// for the room lock and then hold it across its ScyllaDB write.
+func publishTimeout(cfg config.Config) time.Duration {
+	return roomLockTimeout + cfg.Scylla.Timeout.D()
+}
+
 // roomLockTimeout bounds every publish's and membership change's room lock
 // (store.NewRooms). It must be longer than the ScyllaDB write timeout, since
 // a publish holds the lock across its ScyllaDB write.
@@ -175,13 +195,33 @@ func (a roomAdmin) Members(ctx context.Context, room store.UUID) ([]store.UUID, 
 }
 
 // clientAuthenticator returns the authenticator for client connections, or
-// nil if there is none. The dev stub trusts any claimed identity, so it is
-// only used when env is dev; other envs get none until real auth (S-31).
-func clientAuthenticator(env string) auth.Authenticator {
-	if env == config.EnvDev {
-		return auth.Dev{}
+// nil if there is none. A configured JWT key wins in every env; without one,
+// env dev gets the dev stub, which trusts any claimed identity, and any other
+// env gets nothing.
+func clientAuthenticator(cfg config.Config) (auth.Authenticator, error) {
+	if cfg.Auth.JWT.Enabled() {
+		b, err := os.ReadFile(cfg.Auth.JWT.PublicKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("auth.jwt.public_key_file: %w", err)
+		}
+		key, err := auth.ParseEd25519PublicKeyPEM(b)
+		if err != nil {
+			return nil, fmt.Errorf("auth.jwt.public_key_file %s: %w", cfg.Auth.JWT.PublicKeyFile, err)
+		}
+		return auth.NewJWT(key, cfg.Auth.JWT.Issuer, cfg.Auth.JWT.Audience)
 	}
-	return nil
+	if cfg.Env == config.EnvDev {
+		return auth.Dev{}, nil
+	}
+	return nil, nil
+}
+
+// devTools reports whether the dev UI and dev room endpoints are mounted:
+// only alongside the dev stub, since they exist to test with claimed
+// identities and must never sit next to real auth.
+func devTools(a auth.Authenticator) bool {
+	_, ok := a.(auth.Dev)
+	return ok
 }
 
 // serveMetrics serves GET /metrics on addr, its own listener, until stop.

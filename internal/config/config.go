@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -32,6 +33,7 @@ type Config struct {
 	Postgres Postgres `json:"postgres"`
 	Scylla   Scylla   `json:"scylla"`
 	Metrics  Metrics  `json:"metrics"`
+	Auth     Auth     `json:"auth"`
 }
 
 // Metrics configures the Prometheus endpoint (S-37).
@@ -40,6 +42,31 @@ type Metrics struct {
 	// listener. Empty: no metrics endpoint.
 	Addr string `json:"addr"`
 }
+
+// Auth configures client authentication.
+type Auth struct {
+	JWT JWT `json:"jwt"`
+
+	// AllowedOrigins lists the browser origins, besides klacks' own, that
+	// may open /ws (S-43): coder/websocket OriginPatterns, each matched with
+	// path.Match against the Origin host, or against "scheme://host" when
+	// the pattern has a scheme. JWT only: the dev stub's identity rides in
+	// the query string, so it keeps the same-origin check.
+	AllowedOrigins []string `json:"allowed_origins"`
+}
+
+// JWT configures verification of client bearer tokens (S-31): Ed25519
+// (EdDSA) tokens issued by the embedder's identity provider. With no public
+// key file, JWT auth is off: env dev falls back to the dev stub, and any
+// other env serves no client endpoints.
+type JWT struct {
+	PublicKeyFile string `json:"public_key_file"` // PEM "PUBLIC KEY" (PKIX) Ed25519
+	Issuer        string `json:"issuer"`          // required iss
+	Audience      string `json:"audience"`        // required aud
+}
+
+// Enabled reports whether JWT auth is configured.
+func (j JWT) Enabled() bool { return j.PublicKeyFile != "" }
 
 // Log configures structured logging.
 type Log struct {
@@ -189,6 +216,12 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 		cfg.Scylla.ReplicationFactor = n
 	}
 	dur("KLACKS_SCYLLA_TIMEOUT", &cfg.Scylla.Timeout)
+	str("KLACKS_AUTH_JWT_PUBLIC_KEY_FILE", &cfg.Auth.JWT.PublicKeyFile)
+	str("KLACKS_AUTH_JWT_ISSUER", &cfg.Auth.JWT.Issuer)
+	str("KLACKS_AUTH_JWT_AUDIENCE", &cfg.Auth.JWT.Audience)
+	if v := getenv("KLACKS_AUTH_ALLOWED_ORIGINS"); v != "" {
+		cfg.Auth.AllowedOrigins = splitList(v)
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("config: %w", errors.Join(errs...))
 	}
@@ -261,6 +294,22 @@ func (c Config) Validate() error {
 	if c.Scylla.ReplicationFactor < 1 {
 		bad("scylla.replication_factor must be at least 1")
 	}
+	if c.Auth.JWT.Enabled() {
+		if c.Auth.JWT.Issuer == "" {
+			bad("auth.jwt.issuer is required with auth.jwt.public_key_file (KLACKS_AUTH_JWT_ISSUER)")
+		}
+		if c.Auth.JWT.Audience == "" {
+			bad("auth.jwt.audience is required with auth.jwt.public_key_file (KLACKS_AUTH_JWT_AUDIENCE)")
+		}
+	}
+	if len(c.Auth.AllowedOrigins) > 0 && !c.Auth.JWT.Enabled() {
+		bad("auth.allowed_origins needs auth.jwt: the dev stub keeps /ws same-origin")
+	}
+	for _, p := range c.Auth.AllowedOrigins {
+		if _, err := path.Match(p, ""); err != nil {
+			bad("auth.allowed_origins %q: %v", p, err)
+		}
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("config: %w", errors.Join(errs...))
 	}
@@ -274,6 +323,7 @@ func (c Config) Redacted() Config {
 		c.Scylla.Password = "xxxxx"
 	}
 	c.Scylla.Hosts = append([]string(nil), c.Scylla.Hosts...)
+	c.Auth.AllowedOrigins = append([]string(nil), c.Auth.AllowedOrigins...)
 	return c
 }
 

@@ -24,6 +24,23 @@ jobs:
       - name: vet + lint + test
         run: make check
 
+  fuzz:
+    name: fuzz (short budget)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Fuzz each target for 10s
+        run: FUZZTIME=10s make fuzz
+      - name: Keep failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: "**/testdata/fuzz/**"
+
   integration:
     name: integration tests (Postgres + ScyllaDB)
     runs-on: ubuntu-latest

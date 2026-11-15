@@ -506,9 +506,12 @@ func decodeHeader(b []byte) (ratchetHeader, error) {
 		}
 		return wireToID(binary.BigEndian.Uint64(b[at : at+8]))
 	}
+	// recipient(16) || sender device(16) ends the header: only the exact
+	// encoded length parses (S-35). The earlier check here was at+16, so a
+	// header cut inside the sender device read past the slice and panicked.
 	copyRecipient := func(h *ratchetHeader, at int) error {
-		if len(b) < at+16 {
-			return fail("truncated")
+		if len(b) != at+32 {
+			return fail("wrong length")
 		}
 		copy(h.recipient[:], b[at:at+16])
 		copy(h.device[:], b[at+16:at+32])

@@ -5,10 +5,11 @@ package main
 // (<user>-<device>.sessions.json). The same -user name is the same device
 // with the same keys and sessions on every run, so what peers seal over
 // those sessions decrypts after a restart — the reference client's
-// NewClientWithKeys and RestoreSessions are the "a device restoring its
+// NewClientWithKeys and RestoreState are the "a device restoring its
 // state" path this uses.
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -113,14 +114,29 @@ func writeFileAtomic(path string, data []byte) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// sessionsPath is where the device's ratchet sessions are saved, next to
-// its key file: <user>-<device>.sessions.json.
+// sessionsPath is where the device's client state (sessions, room
+// positions, stashes, sender keys) is saved, next to its key file:
+// <user>-<device>.sessions.json. The name predates S-42's wider snapshot;
+// the client still reads the older sessions-only format.
 func sessionsPath(keyPath string) string {
 	return strings.TrimSuffix(keyPath, ".json") + ".sessions.json"
 }
 
-// restoreSessions loads the saved sessions into c; none saved (a first
-// run, or -fresh) is not an error.
+// seenLogPath is the append-only log of the rooms' seen entries (S-49),
+// one JSON object per line: <user>-<device>.seen.jsonl. Keeping them out
+// of the state file makes each save write only what is new.
+func seenLogPath(keyPath string) string {
+	return strings.TrimSuffix(keyPath, ".json") + ".seen.jsonl"
+}
+
+// restoreSessions loads the saved client state into c, then the seen log;
+// none saved (a first run, or -fresh) is not an error. A log that does not
+// end in a newline was torn by a crash mid-append: it is truncated back to
+// its last newline before anything is appended, so later appends start on
+// a line of their own. The dropped entries were logged before a state
+// that was never written, so they are recorded again when their seqs are
+// redelivered. This runs at startup, under the device lock, before any
+// save.
 func restoreSessions(c *client.Client, keyPath string) error {
 	b, err := os.ReadFile(sessionsPath(keyPath)) //nolint:gosec // derived from the device identity, not user input
 	if errors.Is(err, os.ErrNotExist) {
@@ -129,7 +145,65 @@ func restoreSessions(c *client.Client, keyPath string) error {
 	if err != nil {
 		return err
 	}
-	return c.RestoreSessions(b)
+	if err := c.RestoreState(b); err != nil {
+		return err
+	}
+	logb, err := os.ReadFile(seenLogPath(keyPath)) //nolint:gosec // derived from the device identity, not user input
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if n := bytes.LastIndexByte(logb, '\n') + 1; n < len(logb) {
+		if err := os.Truncate(seenLogPath(keyPath), int64(n)); err != nil {
+			return fmt.Errorf("seen log: drop torn tail: %w", err)
+		}
+		logb = logb[:n]
+	}
+	lines := strings.Split(string(logb), "\n")
+	entries := make([]client.SeenEntry, 0, len(lines))
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		var e client.SeenEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			return fmt.Errorf("seen log line %d: %w", i+1, err)
+		}
+		entries = append(entries, e)
+	}
+	c.RestoreSeen(entries)
+	return nil
+}
+
+// appendSeen appends entries to the seen log and syncs it.
+func appendSeen(path string, entries []client.SeenEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	var buf bytes.Buffer
+	for _, e := range entries {
+		b, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // derived from the device identity
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(buf.Bytes()); err != nil {
+		_ = f.Close() // the write error is the one to report
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close() // the sync error is the one to report
+		return err
+	}
+	return f.Close()
 }
 
 // saveState writes the device's state: the key file (with the one-time
@@ -150,13 +224,18 @@ func (a *app) saveState() error {
 	a.saveMu.Lock()
 	defer a.saveMu.Unlock()
 	syncKeysFromClient(a.keys, a.c)
-	b, err := a.c.MarshalSessions()
+	b, seen, err := a.c.MarshalStateIncremental()
 	if err != nil {
 		return fmt.Errorf("save sessions: %w", err)
+	}
+	// The log first, so the state is never ahead of it (S-49).
+	if err := appendSeen(seenLogPath(a.keyPath), seen); err != nil {
+		return fmt.Errorf("save seen log: %w", err)
 	}
 	if err := writeFileAtomic(sessionsPath(a.keyPath), b); err != nil {
 		return fmt.Errorf("save sessions: %w", err)
 	}
+	a.c.SeenPersisted(len(seen))
 	if err := saveKeys(a.keyPath, a.keys); err != nil {
 		return fmt.Errorf("save keys: %w", err)
 	}

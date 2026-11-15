@@ -6,6 +6,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/lioneljmorrison/klacks/internal/store"
 	"github.com/lioneljmorrison/klacks/pkg/chat"
 )
 
@@ -29,7 +30,8 @@ func errorFor(err error) codes.Code {
 		return codes.FailedPrecondition
 	case errors.Is(err, chat.ErrForbidden):
 		return codes.PermissionDenied
-	case errors.Is(err, chat.ErrClosed):
+	case errors.Is(err, chat.ErrClosed), store.Unavailable(err):
+		// A closed service or a store outage or timeout (S-46): retry.
 		return codes.Unavailable
 	default:
 		return codes.Internal
