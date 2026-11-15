@@ -168,6 +168,10 @@ test-integration: ## Unit + integration tests against the local stack (run `make
 	KLACKS_TEST_SCYLLA_HOSTS="$${KLACKS_TEST_SCYLLA_HOSTS:-$$KLACKS_SCYLLA_HOSTS}" \
 	go test -race -count=1 -tags integration $(PKG)
 
+.PHONY: fuzz
+fuzz: ## Run every fuzz target for FUZZTIME each (default 10s)
+	scripts/fuzz.sh
+
 .PHONY: cover
 cover: ## Run unit tests with a coverage report
 	go test -race -count=1 -coverprofile=coverage.out $(PKG)
@@ -175,3 +179,8 @@ cover: ## Run unit tests with a coverage report
 
 .PHONY: check
 check: vet lint test ## vet + lint + unit tests (what CI runs)
+
+.PHONY: perf
+perf: build ## Performance gate: G-8 load test, fails on a miss (`make up` first; PERF_* knobs in scripts/perf.sh)
+	go build -trimpath -o $(BIN_DIR)/klacksload ./cmd/klacksload
+	scripts/perf.sh

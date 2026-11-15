@@ -26,6 +26,13 @@ const uniqueViolation = "23505"
 type Rooms struct {
 	pool        *pgxpool.Pool
 	lockTimeout time.Duration
+
+	// OnLockHeld, if not nil, is called after each Locked call that took
+	// its room's lock, with how long it held it: from the FOR UPDATE row
+	// lock to the end of the transaction, commit or rollback included
+	// (S-37). Publishes hold it across their ScyllaDB write, so this is the
+	// per-room serialization cost. Set it before use.
+	OnLockHeld func(time.Duration)
 }
 
 // NewRooms returns a Rooms on a pool whose database is migrated.
@@ -36,14 +43,31 @@ type Rooms struct {
 // lock across its ScyllaDB write, during which the Postgres session is idle in
 // transaction; a shorter timeout would kill a live publish. The idle timeout
 // also releases the lock if a process hangs while holding it.
+//
+// lockTimeout also bounds each call that does not take the room lock
+// (CreateRoom, CreateRoomWithID, Role, Members, Watermark) as a client-side
+// deadline (S-47): those server-side timeouts are useless against a
+// partitioned PostgreSQL, which never answers, so without it a call hangs
+// until its caller goes away. 0 disables every one of these timeouts.
 func NewRooms(pool *pgxpool.Pool, lockTimeout time.Duration) *Rooms {
 	return &Rooms{pool: pool, lockTimeout: lockTimeout}
+}
+
+// bounded returns ctx with the per-call deadline for calls that do not take
+// the room lock (see NewRooms).
+func (r *Rooms) bounded(ctx context.Context) (context.Context, context.CancelFunc) {
+	if r.lockTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, r.lockTimeout)
 }
 
 // CreateRoom creates a room of the given kind with a generated ID, its
 // room_seq counter, and owner as its first member with ownerRole, in one
 // transaction.
 func (r *Rooms) CreateRoom(ctx context.Context, kind string, owner UUID, ownerRole string) (UUID, error) {
+	ctx, cancel := r.bounded(ctx)
+	defer cancel()
 	var room UUID
 	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `INSERT INTO rooms (id, kind) VALUES (gen_random_uuid(), $1) RETURNING id`, kind).Scan(&room); err != nil {
@@ -62,6 +86,8 @@ func (r *Rooms) CreateRoom(ctx context.Context, kind string, owner UUID, ownerRo
 // exists fails with the driver's unique-violation error, which the caller
 // surfaces as "already exists".
 func (r *Rooms) CreateRoomWithID(ctx context.Context, room UUID, kind string, owner UUID, ownerRole string) error {
+	ctx, cancel := r.bounded(ctx)
+	defer cancel()
 	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO rooms (id, kind) VALUES ($1, $2)`, room, kind); err != nil {
 			return err
@@ -77,8 +103,10 @@ func createRoomSeqAndMember(ctx context.Context, tx pgx.Tx, room UUID, owner UUI
 	if _, err := tx.Exec(ctx, `INSERT INTO room_seq (room_id) VALUES ($1)`, room); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO room_members (room_id, user_id, role) VALUES ($1, $2, $3)`, room, owner, ownerRole)
-	return err
+	if _, err := tx.Exec(ctx, `INSERT INTO room_members (room_id, user_id, role) VALUES ($1, $2, $3)`, room, owner, ownerRole); err != nil {
+		return err
+	}
+	return audit(ctx, tx, room, AuditRoomCreated, owner, owner, ownerRole)
 }
 
 // Locked runs fn in a transaction that holds the room's room_seq row
@@ -87,7 +115,8 @@ func createRoomSeqAndMember(ctx context.Context, tx pgx.Tx, room UUID, owner UUI
 // returns nil and rolls back otherwise. It returns ErrRoomNotFound, without
 // calling fn, if the room does not exist.
 func (r *Rooms) Locked(ctx context.Context, room UUID, fn func(context.Context, *LockedRoom) error) error {
-	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+	var locked time.Time
+	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		// set_config(..., true) is SET LOCAL: it lasts for this transaction.
 		ms := strconv.FormatInt(r.lockTimeout.Milliseconds(), 10)
 		if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true),
@@ -103,8 +132,14 @@ func (r *Rooms) Locked(ctx context.Context, room UUID, fn func(context.Context, 
 		if err != nil {
 			return fmt.Errorf("rooms: lock %x: %w", room, err)
 		}
+		locked = time.Now()
 		return fn(ctx, l)
 	})
+	// BeginFunc has committed or rolled back by now: the lock is released.
+	if !locked.IsZero() && r.OnLockHeld != nil {
+		r.OnLockHeld(time.Since(locked))
+	}
+	return err
 }
 
 // LockedRoom is a room whose lock is held by the enclosing Locked call. It
@@ -127,9 +162,10 @@ func (l *LockedRoom) Role(ctx context.Context, user UUID) (role string, ok bool,
 	return role, true, nil
 }
 
-// AddMember adds user with role. It returns ErrAlreadyMember if user is a
-// member already.
-func (l *LockedRoom) AddMember(ctx context.Context, user UUID, role string) error {
+// AddMember adds user with role on actor's behalf and records the change in
+// the audit log, in the same transaction. It returns ErrAlreadyMember if
+// user is a member already.
+func (l *LockedRoom) AddMember(ctx context.Context, actor, user UUID, role string) error {
 	_, err := l.tx.Exec(ctx, `INSERT INTO room_members (room_id, user_id, role) VALUES ($1, $2, $3)`, l.room, user, role)
 	if pgErr := (*pgconn.PgError)(nil); errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
 		return fmt.Errorf("rooms: add member: %w", ErrAlreadyMember)
@@ -137,19 +173,22 @@ func (l *LockedRoom) AddMember(ctx context.Context, user UUID, role string) erro
 	if err != nil {
 		return fmt.Errorf("rooms: add member: %w", err)
 	}
-	return nil
+	return audit(ctx, l.tx, l.room, AuditMemberAdded, actor, user, role)
 }
 
-// RemoveMember removes user. It returns ErrMemberNotFound if user is not a member.
-func (l *LockedRoom) RemoveMember(ctx context.Context, user UUID) error {
-	tag, err := l.tx.Exec(ctx, `DELETE FROM room_members WHERE room_id = $1 AND user_id = $2`, l.room, user)
+// RemoveMember removes user on actor's behalf and records the change, with
+// the role user held, in the audit log, in the same transaction. It returns
+// ErrMemberNotFound if user is not a member.
+func (l *LockedRoom) RemoveMember(ctx context.Context, actor, user UUID) error {
+	var role string
+	err := l.tx.QueryRow(ctx, `DELETE FROM room_members WHERE room_id = $1 AND user_id = $2 RETURNING role`, l.room, user).Scan(&role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("rooms: remove member: %w", ErrMemberNotFound)
+	}
 	if err != nil {
 		return fmt.Errorf("rooms: remove member: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("rooms: remove member: %w", ErrMemberNotFound)
-	}
-	return nil
+	return audit(ctx, l.tx, l.room, AuditMemberRemoved, actor, user, role)
 }
 
 // Role returns user's role in room without taking the room lock: a plain
@@ -157,6 +196,8 @@ func (l *LockedRoom) RemoveMember(ctx context.Context, user UUID) error {
 // if user is not a member. It returns ErrRoomNotFound if the room does not
 // exist.
 func (r *Rooms) Role(ctx context.Context, room, user UUID) (role string, ok bool, err error) {
+	ctx, cancel := r.bounded(ctx)
+	defer cancel()
 	err = r.pool.QueryRow(ctx, `SELECT role FROM room_members WHERE room_id = $1 AND user_id = $2`, room, user).Scan(&role)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// No member row: either user is not a member or there is no room.
@@ -178,6 +219,8 @@ func (r *Rooms) Role(ctx context.Context, room, user UUID) (role string, ok bool
 // Members returns the room's member user ids, in no particular order. It
 // returns ErrRoomNotFound if the room does not exist.
 func (r *Rooms) Members(ctx context.Context, room UUID) ([]UUID, error) {
+	ctx, cancel := r.bounded(ctx)
+	defer cancel()
 	rows, err := r.pool.Query(ctx, `SELECT user_id FROM room_members WHERE room_id = $1`, room)
 	if err != nil {
 		return nil, fmt.Errorf("rooms: members: %w", err)
@@ -212,6 +255,8 @@ func (r *Rooms) Members(ctx context.Context, room UUID) ([]UUID, error) {
 // it only observes it). Every seq <= hi is in the message store; rows above
 // hi may be uncommitted orphans and must never be served.
 func (r *Rooms) Watermark(ctx context.Context, room UUID) (int64, error) {
+	ctx, cancel := r.bounded(ctx)
+	defer cancel()
 	var next int64
 	err := r.pool.QueryRow(ctx, `SELECT next_seq FROM room_seq WHERE room_id = $1`, room).Scan(&next)
 	if errors.Is(err, pgx.ErrNoRows) {

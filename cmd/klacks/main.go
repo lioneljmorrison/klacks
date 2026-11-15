@@ -65,7 +65,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 			return 1
 		}
 		return 0
-	case "serve", "migrate":
+	case "serve", "migrate", "reconcile":
 		cfg, ok := load()
 		if !ok {
 			return 1
@@ -81,8 +81,15 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 			return cmdMigrate(ctx, cfg, log, args[1:], stdout, stderr)
 		}
 		if len(args) > 1 {
-			fmt.Fprintf(stderr, "klacks serve: unexpected arguments %q\n", args[1:])
+			fmt.Fprintf(stderr, "klacks %s: unexpected arguments %q\n", args[0], args[1:])
 			return 2
+		}
+		if args[0] == "reconcile" {
+			if err := cmdReconcile(ctx, cfg, log, stdout); err != nil {
+				log.Error("reconcile failed", "err", err)
+				return 1
+			}
+			return 0
 		}
 		if err := cmdServe(ctx, cfg, log); err != nil {
 			log.Error("serve failed", "err", err)
@@ -106,6 +113,8 @@ Commands:
   serve      Run the server (HTTP: /healthz, /readyz)
   migrate    Apply schema migrations to PostgreSQL and ScyllaDB
              (klacks migrate -h for actions)
+  reconcile  After restoring PostgreSQL from a backup: realign room counters
+             with ScyllaDB (servers stopped; see docs/operations.md)
   config     Validate and print the effective configuration (secrets redacted)
   version    Print the version
   help       Show this help

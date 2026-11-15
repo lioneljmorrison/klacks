@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/lioneljmorrison/klacks/internal/auth"
 	"github.com/lioneljmorrison/klacks/internal/config"
@@ -83,5 +84,14 @@ func TestClientAuthenticatorBadKeyFile(t *testing.T) {
 	cfg.Auth.JWT.PublicKeyFile = filepath.Join(t.TempDir(), "missing")
 	if _, err := clientAuthenticator(cfg); err == nil {
 		t.Error("missing key file accepted")
+	}
+}
+
+// S-47: a publish may wait out the room lock and then its ScyllaDB write.
+func TestPublishTimeout(t *testing.T) {
+	cfg := config.Default()
+	cfg.Scylla.Timeout = config.Duration(5 * time.Second)
+	if got, want := publishTimeout(cfg), roomLockTimeout+5*time.Second; got != want {
+		t.Errorf("publishTimeout = %v; want %v", got, want)
 	}
 }

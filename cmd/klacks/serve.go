@@ -78,6 +78,9 @@ type servers struct {
 	http *httpapi.Server
 	mgr  *ws.Manager // nil without a client authenticator
 
+	metricsAddr string       // GET /metrics listener; empty without metrics
+	metrics     http.Handler // its handler
+
 	grpc     *grpc.Server  // nil without grpc.addr
 	grpcTLS  bool          // for the listening log line
 	chat     *chat.Service // the gRPC adapter's service; nil without gRPC
@@ -97,6 +100,27 @@ func newServers(cfg config.Config, pg *pgxpool.Pool, scylla *gocql.Session, log 
 		devices   *httpapi.Devices
 		devRooms  *httpapi.DevRooms
 	)
+	var met *metrics
+	if cfg.Metrics.Addr != "" {
+		met = newMetrics(
+			func() poolStats {
+				st := pg.Stat()
+				return poolStats{Acquired: st.AcquiredConns(), Idle: st.IdleConns(), Total: st.TotalConns(), Max: st.MaxConns()}
+			},
+			func() int {
+				if s.mgr == nil {
+					return 0
+				}
+				return s.mgr.Connections()
+			},
+			func() int64 {
+				if s.mgr == nil {
+					return 0
+				}
+				return s.mgr.SlowDisconnects()
+			},
+		)
+	}
 	a, err := clientAuthenticator(cfg)
 	if err != nil {
 		return nil, err
@@ -110,6 +134,10 @@ func newServers(cfg config.Config, pg *pgxpool.Pool, scylla *gocql.Session, log 
 	// serves: anything that instruments them sees both transports.
 	rooms := store.NewRooms(pg, roomLockTimeout)
 	var messages store.MessageStore = store.NewScyllaMessages(scylla)
+	if met != nil {
+		rooms.OnLockHeld = met.lockHeld
+		messages = met.timed(messages)
+	}
 
 	// One core serves both transports. Its post-commit fan-out and its
 	// removals reach the WebSocket hub and, with gRPC, the chat service's
@@ -130,8 +158,9 @@ func newServers(cfg config.Config, pg *pgxpool.Pool, scylla *gocql.Session, log 
 			posted, removed = s.mgr.Deliver, s.mgr.MemberRemoved
 		}
 		s.chat, svc, err = chat.NewShared(chat.Config{
-			Actor: chat.UserID(actor),
-			Log:   log,
+			Actor:           chat.UserID(actor),
+			RoomLockTimeout: roomLockTimeout,
+			Log:             log,
 		}, pg, rooms, messages, posted, removed)
 		if err != nil {
 			return nil, err
@@ -148,8 +177,11 @@ func newServers(cfg config.Config, pg *pgxpool.Pool, scylla *gocql.Session, log 
 	}
 
 	if s.mgr != nil {
-		devices = httpapi.NewDevices(a, store.NewDevices(pg), log)
+		// The prekey API's store calls share the room calls' deadline
+		// (S-51), so a partitioned PostgreSQL answers 503, not a hang.
+		devices = httpapi.NewDevices(a, store.NewDevices(pg, roomLockTimeout), log)
 		s.mgr.Chat = svc
+		s.mgr.PublishTimeout = publishTimeout(cfg)
 		wsHandler = s.mgr
 		// The dev room endpoints shim core's room management over REST,
 		// so the browser test client can create and populate rooms.
@@ -157,7 +189,11 @@ func newServers(cfg config.Config, pg *pgxpool.Pool, scylla *gocql.Session, log 
 			devRooms = httpapi.NewDevRooms(a, roomAdmin{svc: svc}, log)
 			log.Warn("client auth is the dev stub: any claimed identity is trusted")
 		} else {
-			log.Info("client auth is JWT", "issuer", cfg.Auth.JWT.Issuer, "audience", cfg.Auth.JWT.Audience)
+			// Config validation allows origins only with JWT (S-43).
+			s.mgr.OriginPatterns = cfg.Auth.AllowedOrigins
+			devices.AllowedOrigins = cfg.Auth.AllowedOrigins // S-50
+			log.Info("client auth is JWT", "issuer", cfg.Auth.JWT.Issuer, "audience", cfg.Auth.JWT.Audience,
+				"allowed_origins", cfg.Auth.AllowedOrigins)
 		}
 	} else {
 		log.Warn("no client authenticator for this env (set auth.jwt); /ws and the prekey bundle API are not served", "env", cfg.Env)
@@ -193,6 +229,9 @@ func newServers(cfg config.Config, pg *pgxpool.Pool, scylla *gocql.Session, log 
 		outer.Handle("/", s.http.Handler())
 		s.http.UseHandler(outer)
 	}
+	if met != nil {
+		s.metricsAddr, s.metrics = cfg.Metrics.Addr, met.handler()
+	}
 	return s, nil
 }
 
@@ -225,6 +264,13 @@ func newGRPCServer(cfg config.GRPC, svc *chat.Service) (*grpc.Server, error) {
 func (s *servers) serve(ctx context.Context, httpLn, grpcLn net.Listener) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if s.metrics != nil {
+		stop, err := serveMetrics(ctx, s.metricsAddr, s.metrics, s.log)
+		if err != nil {
+			return err
+		}
+		defer stop()
+	}
 	var (
 		grpcErr  error
 		grpcDone = make(chan struct{})
@@ -267,6 +313,12 @@ func (s *servers) serve(ctx context.Context, httpLn, grpcLn net.Listener) error 
 		grpcErr = fmt.Errorf("grpc: %w", grpcErr)
 	}
 	return errors.Join(httpErr, grpcErr)
+}
+
+// publishTimeout bounds a WebSocket publish end to end (S-47): it may wait
+// for the room lock and then hold it across its ScyllaDB write.
+func publishTimeout(cfg config.Config) time.Duration {
+	return roomLockTimeout + cfg.Scylla.Timeout.D()
 }
 
 // roomLockTimeout bounds every publish's and membership change's room lock
@@ -327,4 +379,28 @@ func clientAuthenticator(cfg config.Config) (auth.Authenticator, error) {
 func devTools(a auth.Authenticator) bool {
 	_, ok := a.(auth.Dev)
 	return ok
+}
+
+// serveMetrics serves GET /metrics on addr, its own listener, until stop.
+// A listener that cannot open fails startup.
+func serveMetrics(ctx context.Context, addr string, h http.Handler, log *slog.Logger) (stop func(), err error) {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("metrics: %w", err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", h)
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("metrics server failed", "err", err)
+		}
+	}()
+	log.Info("metrics listening", "addr", ln.Addr().String())
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}, nil
 }

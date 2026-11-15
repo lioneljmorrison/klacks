@@ -81,24 +81,24 @@ func TestRoomsMembership(t *testing.T) {
 	if _, ok := role(t, rooms, room, user); ok {
 		t.Fatal("non-member has a role")
 	}
-	if err := locked(func(ctx context.Context, l *store.LockedRoom) error { return l.AddMember(ctx, user, "member") }); err != nil {
+	if err := locked(func(ctx context.Context, l *store.LockedRoom) error { return l.AddMember(ctx, owner, user, "member") }); err != nil {
 		t.Fatal(err)
 	}
 	if r, ok := role(t, rooms, room, user); !ok || r != "member" {
 		t.Fatalf("role = %q, %t; want member", r, ok)
 	}
-	err = locked(func(ctx context.Context, l *store.LockedRoom) error { return l.AddMember(ctx, user, "admin") })
+	err = locked(func(ctx context.Context, l *store.LockedRoom) error { return l.AddMember(ctx, owner, user, "admin") })
 	if !errors.Is(err, store.ErrAlreadyMember) {
 		t.Fatalf("re-add: err = %v, want ErrAlreadyMember", err)
 	}
 
-	if err := locked(func(ctx context.Context, l *store.LockedRoom) error { return l.RemoveMember(ctx, user) }); err != nil {
+	if err := locked(func(ctx context.Context, l *store.LockedRoom) error { return l.RemoveMember(ctx, owner, user) }); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := role(t, rooms, room, user); ok {
 		t.Fatal("removed member still has a role")
 	}
-	err = locked(func(ctx context.Context, l *store.LockedRoom) error { return l.RemoveMember(ctx, user) })
+	err = locked(func(ctx context.Context, l *store.LockedRoom) error { return l.RemoveMember(ctx, owner, user) })
 	if !errors.Is(err, store.ErrMemberNotFound) {
 		t.Fatalf("remove non-member: err = %v, want ErrMemberNotFound", err)
 	}
@@ -126,7 +126,7 @@ func TestRoomsLockedRollsBack(t *testing.T) {
 	}
 	boom := errors.New("boom")
 	err = rooms.Locked(ctx, room, func(ctx context.Context, l *store.LockedRoom) error {
-		if err := l.AddMember(ctx, id(0xb2), "member"); err != nil {
+		if err := l.AddMember(ctx, id(0xb1), id(0xb2), "member"); err != nil {
 			return err
 		}
 		return boom
@@ -239,4 +239,36 @@ func TestRoomsLockTimeouts(t *testing.T) {
 			t.Fatal("transaction idle past the timeout still succeeded")
 		}
 	})
+}
+
+// OnLockHeld (S-37) reports how long each Locked call held the room lock:
+// from the FOR UPDATE row lock to the end of the transaction, commit
+// included. A room that does not exist never held a lock.
+func TestRoomsOnLockHeld(t *testing.T) {
+	rooms := store.NewRooms(dbtest.MigratedPostgres(t), testLockTimeout)
+	ctx := context.Background()
+	room, err := rooms.CreateRoom(ctx, "group", id(0xb1), "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var held []time.Duration
+	rooms.OnLockHeld = func(d time.Duration) { held = append(held, d) }
+	const work = 30 * time.Millisecond
+	if err := rooms.Locked(ctx, room, func(context.Context, *store.LockedRoom) error {
+		time.Sleep(work)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	boom := errors.New("boom")
+	if err := rooms.Locked(ctx, room, func(context.Context, *store.LockedRoom) error { return boom }); !errors.Is(err, boom) {
+		t.Fatal(err)
+	}
+	_ = rooms.Locked(ctx, id(0xee), func(context.Context, *store.LockedRoom) error { return nil })
+	if len(held) != 2 {
+		t.Fatalf("OnLockHeld called %d times; want 2 (commit and rollback, not the missing room)", len(held))
+	}
+	if held[0] < work {
+		t.Errorf("held %v; want at least the %v of work inside", held[0], work)
+	}
 }

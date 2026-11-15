@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -31,6 +32,7 @@ type Config struct {
 	HTTP     HTTP     `json:"http"`
 	Postgres Postgres `json:"postgres"`
 	Scylla   Scylla   `json:"scylla"`
+	Metrics  Metrics  `json:"metrics"`
 	Auth     Auth     `json:"auth"`
 	GRPC     GRPC     `json:"grpc"`
 }
@@ -58,9 +60,23 @@ func (g GRPC) Enabled() bool { return g.Addr != "" }
 // TLS reports whether gRPC is served over TLS.
 func (g GRPC) TLS() bool { return g.TLSCertFile != "" }
 
+// Metrics configures the Prometheus endpoint (S-37).
+type Metrics struct {
+	// Addr is the listener for GET /metrics, kept apart from the client
+	// listener. Empty: no metrics endpoint.
+	Addr string `json:"addr"`
+}
+
 // Auth configures client authentication.
 type Auth struct {
 	JWT JWT `json:"jwt"`
+
+	// AllowedOrigins lists the browser origins, besides klacks' own, that
+	// may open /ws (S-43): coder/websocket OriginPatterns, each matched with
+	// path.Match against the Origin host, or against "scheme://host" when
+	// the pattern has a scheme. JWT only: the dev stub's identity rides in
+	// the query string, so it keeps the same-origin check.
+	AllowedOrigins []string `json:"allowed_origins"`
 }
 
 // JWT configures verification of client bearer tokens (S-31): Ed25519
@@ -201,6 +217,7 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	str("KLACKS_LOG_LEVEL", &cfg.Log.Level)
 	str("KLACKS_LOG_FORMAT", &cfg.Log.Format)
 	str("KLACKS_HTTP_ADDR", &cfg.HTTP.Addr)
+	str("KLACKS_METRICS_ADDR", &cfg.Metrics.Addr)
 	dur("KLACKS_HTTP_READ_HEADER_TIMEOUT", &cfg.HTTP.ReadHeaderTimeout)
 	dur("KLACKS_HTTP_READ_TIMEOUT", &cfg.HTTP.ReadTimeout)
 	dur("KLACKS_HTTP_WRITE_TIMEOUT", &cfg.HTTP.WriteTimeout)
@@ -233,6 +250,9 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	str("KLACKS_GRPC_ACTOR", &cfg.GRPC.Actor)
 	str("KLACKS_GRPC_TLS_CERT_FILE", &cfg.GRPC.TLSCertFile)
 	str("KLACKS_GRPC_TLS_KEY_FILE", &cfg.GRPC.TLSKeyFile)
+	if v := getenv("KLACKS_AUTH_ALLOWED_ORIGINS"); v != "" {
+		cfg.Auth.AllowedOrigins = splitList(v)
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("config: %w", errors.Join(errs...))
 	}
@@ -274,6 +294,11 @@ func (c Config) Validate() error {
 	}
 	if _, _, err := net.SplitHostPort(c.HTTP.Addr); err != nil {
 		bad("http.addr %q: %v", c.HTTP.Addr, err)
+	}
+	if c.Metrics.Addr != "" {
+		if _, _, err := net.SplitHostPort(c.Metrics.Addr); err != nil {
+			bad("metrics.addr %q: %v", c.Metrics.Addr, err)
+		}
 	}
 	for name, d := range map[string]Duration{
 		"http.read_header_timeout": c.HTTP.ReadHeaderTimeout,
@@ -330,6 +355,14 @@ func (c Config) Validate() error {
 			bad("grpc.tls_cert_file and grpc.tls_key_file go together")
 		}
 	}
+	if len(c.Auth.AllowedOrigins) > 0 && !c.Auth.JWT.Enabled() {
+		bad("auth.allowed_origins needs auth.jwt: the dev stub keeps /ws same-origin")
+	}
+	for _, p := range c.Auth.AllowedOrigins {
+		if _, err := path.Match(p, ""); err != nil {
+			bad("auth.allowed_origins %q: %v", p, err)
+		}
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("config: %w", errors.Join(errs...))
 	}
@@ -349,6 +382,7 @@ func (c Config) Redacted() Config {
 			c.GRPC.ServiceTokens[i] = "xxxxx"
 		}
 	}
+	c.Auth.AllowedOrigins = append([]string(nil), c.Auth.AllowedOrigins...)
 	return c
 }
 

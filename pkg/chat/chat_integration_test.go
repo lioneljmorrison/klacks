@@ -395,3 +395,56 @@ func TestOnMemberRemoved(t *testing.T) {
 		t.Fatalf("event = %+v, want bob removed by the actor from %v", e, room)
 	}
 }
+
+// TestAuditLog: an embedder reads a room's membership history (S-33), page
+// by page.
+func TestAuditLog(t *testing.T) {
+	svc, _ := openChat(t, nil)
+	ctx := context.Background()
+	room, err := svc.CreateRoom(ctx, chat.RoomSpec{Kind: chat.KindGroup})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AddMember(ctx, room, alice, chat.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RemoveMember(ctx, room, alice); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := svc.AuditLog(ctx, room, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 {
+		t.Fatalf("first page: %d events; want 2", len(first))
+	}
+	rest, err := svc.AuditLog(ctx, room, first[1].ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := append(first, rest...)
+	want := []chat.AuditEvent{
+		{Room: room, Action: chat.AuditRoomCreated, Actor: actor, Target: actor, Role: chat.RoleOwner},
+		{Room: room, Action: chat.AuditMemberAdded, Actor: actor, Target: alice, Role: chat.RoleMember},
+		{Room: room, Action: chat.AuditMemberRemoved, Actor: actor, Target: alice, Role: chat.RoleMember},
+	}
+	if len(all) != len(want) {
+		t.Fatalf("events = %+v", all)
+	}
+	for i := range want {
+		g := all[i]
+		if g.At.IsZero() {
+			t.Errorf("event %d has no time", i)
+		}
+		g.ID, g.At = 0, want[i].At
+		if g != want[i] {
+			t.Errorf("event %d = %+v; want %+v", i, g, want[i])
+		}
+	}
+	for _, limit := range []int{0, -1, chat.MaxAuditPage + 1} {
+		if _, err := svc.AuditLog(ctx, room, 0, limit); !errors.Is(err, chat.ErrInvalidArgument) {
+			t.Errorf("limit %d: err = %v; want ErrInvalidArgument", limit, err)
+		}
+	}
+}
