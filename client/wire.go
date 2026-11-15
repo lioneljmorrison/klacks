@@ -121,8 +121,18 @@ func (c *Client) Subscribe(ctx context.Context, room [16]byte) error {
 	return c.sendFrame(ctx, &protocol.Subscribe{RoomID: protocol.UUID(room)})
 }
 
-// Publish sends one already-sealed envelope.
+// publish sends one already-sealed envelope, after the BeforePublish hook
+// (see SetBeforePublish): every chain step it carries is saved before it
+// leaves. A hook error stops it.
 func (c *Client) publish(ctx context.Context, room [16]byte, e encryptResult) error {
+	c.mu.Lock()
+	save := c.beforePublish
+	c.mu.Unlock()
+	if save != nil {
+		if err := save(); err != nil {
+			return err
+		}
+	}
 	return c.sendFrame(ctx, &protocol.Publish{
 		RoomID:     protocol.UUID(room),
 		MessageID:  protocol.UUID(e.MessageID),
@@ -140,14 +150,6 @@ func (c *Client) Send(ctx context.Context, room [16]byte, peers []Peer, plaintex
 		e, err := c.sealFor(ctx, room, p, plaintext)
 		if err != nil {
 			return err
-		}
-		c.mu.Lock()
-		save := c.beforePublish
-		c.mu.Unlock()
-		if save != nil {
-			if err := save(); err != nil {
-				return err
-			}
 		}
 		if err := c.publish(ctx, room, e); err != nil {
 			return err
@@ -343,6 +345,26 @@ func (c *Client) decryptDeliver(d deliver, redelivery bool) {
 	}
 }
 
+// stash appends d to a stash unless the stash already holds it (S-52): a
+// message redelivered while it waits (resume and live delivery overlap) is
+// one message, and draining two copies would emit it twice.
+func stash(ds []deliver, d deliver) []deliver {
+	if stashed(ds, d) {
+		return ds
+	}
+	return append(ds, d)
+}
+
+// stashed reports whether ds holds d's (seq, message id).
+func stashed(ds []deliver, d deliver) bool {
+	for _, x := range ds {
+		if x.Seq == d.Seq && x.MessageID == d.MessageID {
+			return true
+		}
+	}
+	return false
+}
+
 // takePending returns and clears the messages stashed for a sender device.
 func (c *Client) takePending(room, senderDevice [16]byte) []deliver {
 	c.mu.Lock()
@@ -376,6 +398,7 @@ func (c *Client) checkOrdering(room [16]byte, seq int64, mid [16]byte) (redelive
 		rs.lastSeq = seq
 		rs.seen[seq] = mid
 		rs.ids[mid] = seq
+		c.seenLog = append(c.seenLog, SeenEntry{Room: room, Seq: seq, ID: mid})
 		return false, nil
 	}
 	switch {
@@ -383,6 +406,7 @@ func (c *Client) checkOrdering(room [16]byte, seq int64, mid [16]byte) (redelive
 		rs.lastSeq = seq
 		rs.seen[seq] = mid
 		rs.ids[mid] = seq
+		c.seenLog = append(c.seenLog, SeenEntry{Room: room, Seq: seq, ID: mid})
 		return false, nil
 	case seq <= rs.lastSeq:
 		if id, ok := rs.seen[seq]; ok && id == mid {

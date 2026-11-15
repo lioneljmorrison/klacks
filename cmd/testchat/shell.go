@@ -67,7 +67,7 @@ func (a *app) help() {
   /members <room>                refresh the member list from the server
   /join <room>                   subscribe to a room: resume from seq 0
   /send <room> <text...>         seal and publish text to every member device
-  /resume <room> [lastSeenSeq]   replay after seq (default: the furthest seen)
+  /resume <room> [lastSeenSeq]   replay after seq (default: where this device left off)
   /drop                          drop the connection (simulates an outage)
   /dial                          (re)connect the WebSocket
   /register                      upload this device's bundle (automatic at startup)
@@ -233,8 +233,8 @@ func (a *app) cmdRegister(ctx context.Context) {
 }
 
 // cmdResume asks the server for everything in the room after lastSeen, then
-// live delivery. With no seq argument the default is the furthest seq this
-// session has seen.
+// live delivery. With no seq argument the default is the device's resume
+// point: the last seq it consumed, across restarts.
 func (a *app) cmdResume(ctx context.Context, args []string) {
 	if len(args) < 1 || len(args) > 2 {
 		a.outf("usage: /resume <room> [lastSeenSeq]")
@@ -252,11 +252,7 @@ func (a *app) cmdResume(ctx context.Context, args []string) {
 			return
 		}
 	} else {
-		a.mu.Lock()
-		if r, ok := a.rooms[room]; ok {
-			from = r.lastSeen
-		}
-		a.mu.Unlock()
+		from = a.resumePoint(room)
 	}
 	if err := a.c.Resume(ctx, room, from); err != nil {
 		a.outf("resume: %v", err)

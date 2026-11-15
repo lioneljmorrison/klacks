@@ -76,7 +76,7 @@ func newE2EStackWith(t *testing.T, a auth.Authenticator) *e2eStack {
 	svc := core.New(rooms, msgs, m.Deliver, m.MemberRemoved)
 	m.Chat = svc
 
-	devices := store.NewDevices(pool)
+	devices := store.NewDevices(pool, 0)
 	srv := httpapi.NewServer(config.HTTP{}, httpapi.NewHealth(nil, time.Second, log),
 		m, httpapi.NewDevices(a, devices, log), log)
 	ts := newTestServer(t, srv.Handler())

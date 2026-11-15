@@ -99,7 +99,7 @@ func (s *Service) AddMember(ctx context.Context, room, actor, user store.UUID, r
 		if err := authorize(request{actor: actorRole, action: actAdd, target: role}); err != nil {
 			return fmt.Errorf("add member: %w", err)
 		}
-		return l.AddMember(ctx, user, string(role))
+		return l.AddMember(ctx, actor, user, string(role))
 	})
 }
 
@@ -124,7 +124,7 @@ func (s *Service) RemoveMember(ctx context.Context, room, actor, user store.UUID
 		if err := authorize(request{actor: actorRole, action: actRemove, target: target, self: actor == user}); err != nil {
 			return fmt.Errorf("remove member: %w", err)
 		}
-		return l.RemoveMember(ctx, user)
+		return l.RemoveMember(ctx, actor, user)
 	})
 	if err != nil {
 		return err
@@ -150,4 +150,10 @@ func memberRole(ctx context.Context, l *store.LockedRoom, user store.UUID) (Role
 // changes it was offline for.
 func (s *Service) Members(ctx context.Context, room store.UUID) ([]store.UUID, error) {
 	return s.rooms.Members(ctx, room)
+}
+
+// Audit returns up to limit of room's membership audit events with an ID
+// above after, oldest first (S-33).
+func (s *Service) Audit(ctx context.Context, room store.UUID, after int64, limit int) ([]store.AuditEvent, error) {
+	return s.rooms.Audit(ctx, room, after, limit)
 }

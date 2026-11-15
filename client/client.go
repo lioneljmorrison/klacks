@@ -69,6 +69,10 @@ type Client struct {
 	// stub's identity claims.
 	token func(context.Context) (string, error)
 
+	// seenLog holds the seen entries recorded since the caller last
+	// acknowledged them (MarshalStateIncremental, SeenPersisted; S-49).
+	seenLog []SeenEntry
+
 	// beforePublish, when set, runs after Send seals each envelope and
 	// before it is published (SetBeforePublish).
 	beforePublish func() error
